@@ -2,7 +2,7 @@
 
 **Bulk-add every movie and show whose title matches your keywords to Radarr and Sonarr.**
 
-Titularr is a companion tool for the *arr stack. You give it a word, phrase, or pattern, and it searches Radarr's and Sonarr's metadata lookups for every movie and series whose title matches, then adds them all in one pass with the quality profile, root folder, and monitoring options you choose. From there, Radarr and Sonarr handle downloading as usual, and your media server picks everything up through your existing libraries.
+Titularr is a companion tool for the *arr stack. You give it a word, phrase, or pattern, and it searches movie and TV metadata sources (starting with TMDB) for every movie and series whose title matches, then adds them all in one pass with the quality profile, root folder, and monitoring options you choose. From there, Radarr and Sonarr handle downloading as usual, and your media server picks everything up through your existing libraries.
 
 Want every movie with "Christmas" in the title for a holiday collection? Every show with "Star Trek" in the name? Every film titled "Dracula" across a century of remakes? That's what Titularr is for.
 
