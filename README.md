@@ -2,7 +2,7 @@
 
 **Bulk-add every movie and show whose title matches your keywords to Radarr and Sonarr.**
 
-Titularr is a companion tool for the *arr stack. You give it a word, phrase, or pattern, and it searches Radarr's and Sonarr's metadata lookups for every movie and series whose title matches, then adds them all in one pass with the quality profile, root folder, and monitoring options you choose. From there, Radarr and Sonarr handle downloading as usual, and letting your watching service pick everything up through your existing libraries.
+Titularr is a companion tool for the *arr stack. You give it a word, phrase, or pattern, and it searches Radarr's and Sonarr's metadata lookups for every movie and series whose title matches, then adds them all in one pass with the quality profile, root folder, and monitoring options you choose. From there, Radarr and Sonarr handle downloading as usual, and your media server picks everything up through your existing libraries.
 
 Want every movie with "Christmas" in the title for a holiday collection? Every show with "Star Trek" in the name? Every film titled "Dracula" across a century of remakes? That's what Titularr is for.
 
@@ -74,14 +74,18 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 
 ## Roadmap
 
-- [ ] Project scaffolding and config loading
-- [ ] Radarr lookup and add
-- [ ] Sonarr lookup and add
-- [ ] Matching modes (substring, word, regex)
-- [ ] Dry-run output
-- [ ] Filters and exclusions
+- [x] Project scaffolding
+- [ ] First metadata source (TMDB) with full-result search
+- [ ] Matching modes (substring, word, regex), filters, and exclusions
+- [ ] Config file loading and dry-run output
+- [ ] Radarr and Sonarr library awareness (skip titles you already have)
+- [ ] Run history (SQLite)
+- [ ] Adding matches to Radarr and Sonarr
+- [ ] More metadata sources (TVDB, then others)
 - [ ] Saved queries and scheduling
-- [ ] Docker image
+- [ ] Docker service with an HTTP API
+- [ ] Beyond-title search: collections, keywords, characters (e.g. every Batman movie)
+- [ ] Radarr/Sonarr lookup as a source
 - [ ] Optional web UI
 
 ## Contributing
@@ -90,4 +94,4 @@ The project is just getting started. Issues with ideas, use cases, and feature r
 
 ## License
 
-GNU
+GPL-3.0. See [LICENSE](LICENSE).
