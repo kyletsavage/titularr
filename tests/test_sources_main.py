@@ -241,6 +241,82 @@ def test_invalid_filters_are_rejected_before_any_request(fake_tmdb, capsys, args
     assert fake_tmdb == []
 
 
+# --- exclusions ---
+
+
+def test_exclusions_add_an_excluded_count(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--exclude-id", "movie:1", "--exclude-title", "wars")
+
+    assert status == 0
+    assert out == [
+        CHRISTMASTIME,
+        (
+            "4 movies found, 3 matched, 1 excluded, 1 kept; "
+            "2 series found, 1 matched, 1 excluded, 0 kept; 0 warnings"
+        ),
+    ]
+
+
+def test_excluded_id_needs_the_right_kind(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--exclude-id", "series:1")
+
+    assert status == 0
+    assert out[0] == STORY
+    assert out[-1] == "4 movies found, 3 matched, 0 excluded, 2 kept; 0 warnings"
+
+
+def test_exclude_regex(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--exclude-regex", "^a ")
+
+    assert status == 0
+    assert out == [CHRISTMASTIME, "4 movies found, 3 matched, 1 excluded, 1 kept; 0 warnings"]
+
+
+def test_exclusion_takes_priority_over_filter_reasons(fake_tmdb, capsys):
+    args = ["christmas", "--kind", "movie", "--min-votes", "50", "--show-dropped"]
+    status, out = run(capsys, *args, "--exclude-title", "christmastime")
+
+    assert status == 0
+    assert out == [
+        STORY,
+        CHRISTMASTIME + ' (excluded: title "christmastime")',
+        "[movie] Secret Santa (2015)  tmdb:3  lang:en  rating:?  votes:? (no match)",
+        ADULT + " (filtered: language unknown; votes unknown)",
+        "4 movies found, 3 matched, 1 excluded, 1 kept; 0 warnings",
+    ]
+
+
+def test_exclusions_alone_show_kept_count(fake_tmdb, capsys):
+    status, out = run(
+        capsys, "christmas", "--kind", "movie", "--any-language", "--exclude-id", "movie:4"
+    )
+
+    assert status == 0
+    assert out == [
+        STORY,
+        CHRISTMASTIME,
+        "4 movies found, 3 matched, 1 excluded, 2 kept; 0 warnings",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--exclude-id", "1399"], "expected movie:<id> or series:<id>"),
+        (["--exclude-id", "tv:1399"], "expected movie:<id> or series:<id>"),
+        (["--exclude-title", " "], "must not be empty"),
+        (["--exclude-regex", "(unclosed"], "invalid regex"),
+    ],
+)
+def test_invalid_exclusions_are_rejected_before_any_request(fake_tmdb, capsys, args, message):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["christmas", *args])
+
+    assert excinfo.value.code == 2
+    assert message in capsys.readouterr().err
+    assert fake_tmdb == []
+
+
 # --- errors and argument handling ---
 
 
