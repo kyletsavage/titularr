@@ -75,7 +75,8 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 ## Roadmap
 
 - [x] Project scaffolding
-- [ ] First metadata source (TMDB) with full-result search
+- [x] TMDB movie search (all result pages)
+- [ ] TMDB TV search
 - [ ] Matching modes (substring, word, regex), filters, and exclusions
 - [ ] Config file loading and dry-run output
 - [ ] Radarr and Sonarr library awareness (skip titles you already have)
