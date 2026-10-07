@@ -3,11 +3,14 @@
     uv run python -m titularr.sources "christmas" [--kind movie|series|both]
         [--match substring|word | --regex PATTERN] [--adult exclude|include|only]
         [--year-min YEAR] [--year-max YEAR] [--language CODE ...]
-        [--min-rating N] [--min-votes N] [--keep-unknown] [--show-dropped]
+        [--min-rating N] [--min-votes N] [--keep-unknown]
+        [--exclude-id KIND:ID ...] [--exclude-title TEXT ...] [--exclude-regex PATTERN ...]
+        [--show-dropped]
 
 The search text is always what TMDB searches for. Matching then keeps only titles that
 contain it (substring, the default), contain it as a whole word (--match word), or
-match --regex PATTERN instead. Filters then narrow the matching titles; see --help.
+match --regex PATTERN instead. Exclusions then drop titles that must never be kept, and
+filters narrow the rest; see --help.
 
 Needs your TMDB "API Read Access Token" in the TMDB_API_TOKEN environment variable.
 Temporary: phase 3's real CLI replaces this.
@@ -22,6 +25,7 @@ from typing import get_args
 import httpx2
 from pydantic import ValidationError
 
+from titularr.exclusions import Exclusions
 from titularr.filters import Filters
 from titularr.matching import TitleMatcher
 from titularr.models import AdultMode, Candidate
@@ -90,10 +94,32 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="keep titles whose value for a filter is unknown (dropped by default)",
     )
+    excludes = parser.add_argument_group("exclusions (titles never to keep; each repeatable)")
+    excludes.add_argument(
+        "--exclude-id",
+        action="append",
+        default=[],
+        metavar="KIND:ID",
+        help="a TMDB ID, e.g. movie:1399 or series:1399",
+    )
+    excludes.add_argument(
+        "--exclude-title",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="titles containing this text (ignoring case and accents)",
+    )
+    excludes.add_argument(
+        "--exclude-regex",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="titles matching this regular expression (case-insensitive)",
+    )
     parser.add_argument(
         "--show-dropped",
         action="store_true",
-        help="also list titles that didn't match or were filtered out, with the reason",
+        help="also list titles that didn't match, were excluded or were filtered out",
     )
     args = parser.parse_args(argv)
 
@@ -119,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
         settings["languages"] = frozenset(args.language)
     try:
         keep = Filters(**settings)
+        exclude = Exclusions(
+            ids=frozenset(args.exclude_id),
+            titles=tuple(args.exclude_title),
+            regexes=tuple(args.exclude_regex),
+        )
     except ValidationError as e:
         parser.error(_describe(e))
 
@@ -135,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     kinds = ["movie", "series"] if args.kind == "both" else [args.kind]
     found = dict.fromkeys(kinds, 0)
     matched = dict.fromkeys(kinds, 0)
+    excluded = dict.fromkeys(kinds, 0)
     kept = dict.fromkeys(kinds, 0)
     warnings = _WarningCounter()
     package_log = logging.getLogger("titularr")
@@ -148,13 +180,16 @@ def main(argv: list[str] | None = None) -> int:
                     found[kind] += 1
                     if not matcher.matches(c):
                         dropped = " (no match)"
-                    elif reasons := keep.reasons(c):
-                        matched[kind] += 1
-                        dropped = f" (filtered: {'; '.join(reasons)})"
                     else:
                         matched[kind] += 1
-                        kept[kind] += 1
-                        dropped = ""
+                        if reason := exclude.reason(c):
+                            excluded[kind] += 1
+                            dropped = f" (excluded: {reason})"
+                        elif reasons := keep.reasons(c):
+                            dropped = f" (filtered: {'; '.join(reasons)})"
+                        else:
+                            kept[kind] += 1
+                            dropped = ""
                     if not dropped or args.show_dropped:
                         print(_describe_candidate(c) + dropped)
     except (TmdbError, httpx2.HTTPError) as e:
@@ -168,7 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     for kind in kinds:
         one, many = _KIND_WORDS[kind]
         part = f"{_plural(found[kind], one, many)} found, {matched[kind]} matched"
-        if keep.active:
+        if exclude.active:
+            part += f", {excluded[kind]} excluded"
+        if keep.active or exclude.active:
             part += f", {kept[kind]} kept"
         parts.append(part)
     parts.append(_plural(warnings.count, "warning", "warnings"))

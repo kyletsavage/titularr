@@ -80,8 +80,8 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 - [x] Title matching (substring, word, regex)
 - [x] Filters (year, language, rating, votes)
 - [ ] Runtime filter (needs a lookup per title)
-- [ ] Exclusions
-- [ ] Config file loading and dry-run output
+- [x] Exclusions per run (TMDB IDs, title patterns)
+- [ ] Config file loading (including saved exclusions) and dry-run output
 - [ ] Radarr and Sonarr library awareness (skip titles you already have)
 - [ ] Run history (SQLite)
 - [ ] Adding matches to Radarr and Sonarr (including the TVDB ID lookup Sonarr needs for series)
@@ -90,7 +90,7 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 - [ ] Docker service with an HTTP API
 - [ ] Beyond-title search: collections, keywords, characters (e.g. every Batman movie)
 - [ ] Radarr/Sonarr lookup as a source
-- [ ] Optional web UI
+- [ ] Optional web UI (including manual review and an exclusion blacklist)
 
 ## Contributing
 
