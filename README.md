@@ -77,7 +77,9 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 - [x] Project scaffolding
 - [x] TMDB movie search (all result pages)
 - [x] TMDB series search
-- [ ] Matching modes (substring, word, regex), filters, and exclusions
+- [x] Title matching (substring, word, regex)
+- [ ] Filters (year, language, rating, votes, runtime)
+- [ ] Exclusions
 - [ ] Config file loading and dry-run output
 - [ ] Radarr and Sonarr library awareness (skip titles you already have)
 - [ ] Run history (SQLite)
