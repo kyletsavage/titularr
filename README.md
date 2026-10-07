@@ -76,13 +76,13 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 
 - [x] Project scaffolding
 - [x] TMDB movie search (all result pages)
-- [ ] TMDB TV search
+- [x] TMDB series search
 - [ ] Matching modes (substring, word, regex), filters, and exclusions
 - [ ] Config file loading and dry-run output
 - [ ] Radarr and Sonarr library awareness (skip titles you already have)
 - [ ] Run history (SQLite)
-- [ ] Adding matches to Radarr and Sonarr
-- [ ] More metadata sources (TVDB, then others)
+- [ ] Adding matches to Radarr and Sonarr (including the TVDB ID lookup Sonarr needs for series)
+- [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
 - [ ] Saved queries and scheduling
 - [ ] Docker service with an HTTP API
 - [ ] Beyond-title search: collections, keywords, characters (e.g. every Batman movie)

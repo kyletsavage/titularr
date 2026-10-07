@@ -221,59 +221,104 @@ def test_unexpected_response_shape_raises():
         list(client.search_movies("dracula"))
 
 
-def fake_tmdb_for_main(monkeypatch, results):
-    """Point main() at fake TMDB data; returns the list of requests it makes."""
-    requests = []
+# --- Series (/search/tv) ---
+
+
+def series(id, name, first_air_date="2019-11-29", **overrides):
+    return {
+        "id": id,
+        "name": name,
+        "original_name": name,
+        "first_air_date": first_air_date,
+        "original_language": "en",
+        "vote_average": 6.4,
+        "vote_count": 85,
+        "origin_country": ["US"],  # not stored yet; ignored
+        **overrides,
+    }
+
+
+def test_series_search_uses_tv_endpoint_and_maps_fields():
+    def handler(request):
+        return httpx2.Response(
+            200, json=search_page(1, 1, [series(65550, "Christmas Wars", "2022-12-13")])
+        )
+
+    client, requests = client_for(handler)
+    (result,) = client.search_series("christmas")
+
+    assert requests[0].url.path == "/3/search/tv"
+    assert requests[0].url.params["include_adult"] == "false"
+    assert result.kind == "series"
+    assert result.source == "tmdb"
+    assert result.tmdb_id == 65550
+    assert result.title == "Christmas Wars"
+    assert result.original_title == "Christmas Wars"
+    assert result.year == 2022
+    assert result.vote_count == 85
+
+
+def test_series_search_fetches_every_page():
+    def handler(request):
+        page = int(request.url.params["page"])
+        return httpx2.Response(200, json=search_page(page, 3, [series(page, f"Show {page}")]))
+
+    client, requests = client_for(handler)
+    results = list(client.search_series("show"))
+
+    assert [s.tmdb_id for s in results] == [1, 2, 3]
+    assert len(requests) == 3
+
+
+def test_sparse_series_gives_none_for_missing_fields():
+    def handler(request):
+        return httpx2.Response(200, json=search_page(1, 1, [{"id": 9, "name": "Unaired"}]))
+
+    client, _ = client_for(handler)
+    (result,) = client.search_series("x")
+    assert result.title == "Unaired"
+    assert result.year is None
+    assert result.original_title is None
+    assert result.vote_count is None
+    assert result.adult is None
+
+
+def test_series_without_id_or_name_is_skipped(caplog):
+    # A series has "name", not "title": a "title" key alone doesn't count.
+    results = [series(1, "Good"), {"id": 2}, {"id": 3, "title": "Wrong key"}, {"name": "No ID"}]
 
     def handler(request):
-        requests.append(request)
         return httpx2.Response(200, json=search_page(1, 1, results))
 
-    real_client = tmdb.TmdbClient
-    monkeypatch.setenv("TMDB_API_TOKEN", TOKEN)
-    monkeypatch.setattr(
-        tmdb,
-        "TmdbClient",
-        lambda token: real_client(token, transport=httpx2.MockTransport(handler)),
-    )
-    return requests
+    client, _ = client_for(handler)
+    with caplog.at_level(logging.WARNING):
+        found = list(client.search_series("x"))
+
+    assert [s.tmdb_id for s in found] == [1]
+    assert caplog.text.count("skipping TMDB result") == 3
 
 
-def test_main_prints_results_and_summary(monkeypatch, capsys):
-    results = [movie(1, "Elf", "2003-10-09"), {"id": 2}, {"id": 3, "title": "Unrated"}]
-    requests = fake_tmdb_for_main(monkeypatch, results)
-
-    assert tmdb.main(["christmas"]) == 0
-    assert requests[0].url.params["include_adult"] == "false"
-
-    out = capsys.readouterr().out.splitlines()
-    assert out == [
-        "Elf (2003)  tmdb:1  votes:1200",
-        "Unrated (?)  tmdb:3  votes:?",
-        "2 results, 1 warning",
-    ]
+SERIES_MIXED = [
+    series(1, "Regular", adult=False),
+    series(2, "Adult", adult=True),
+    series(3, "Unmarked"),
+]
 
 
-def test_main_adult_only(monkeypatch, capsys):
-    requests = fake_tmdb_for_main(monkeypatch, MIXED)
+@pytest.mark.parametrize(
+    ("mode", "sent", "expected_ids"),
+    [
+        ("exclude", "false", [1, 2, 3]),
+        ("include", "true", [1, 2, 3]),
+        ("only", "true", [2]),
+    ],
+)
+def test_series_adult_modes(mode, sent, expected_ids):
+    def handler(request):
+        return httpx2.Response(200, json=search_page(1, 1, SERIES_MIXED))
 
-    assert tmdb.main(["christmas", "--adult", "only"]) == 0
-    assert requests[0].url.params["include_adult"] == "true"
-    assert capsys.readouterr().out.splitlines() == [
-        "Adult (2001)  tmdb:2  votes:1200",
-        "1 result, 0 warnings",
-    ]
+    client, requests = client_for(handler)
+    results = list(client.search_series("x", adult=mode))
 
-
-def test_main_rejects_unknown_adult_mode(monkeypatch, capsys):
-    fake_tmdb_for_main(monkeypatch, [])
-    with pytest.raises(SystemExit) as excinfo:
-        tmdb.main(["christmas", "--adult", "sometimes"])
-    assert excinfo.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
-
-
-def test_main_requires_token(monkeypatch, capsys):
-    monkeypatch.delenv("TMDB_API_TOKEN", raising=False)
-    assert tmdb.main(["christmas"]) == 2
-    assert "TMDB_API_TOKEN" in capsys.readouterr().err
+    assert requests[0].url.params["include_adult"] == sent
+    assert [s.tmdb_id for s in results] == expected_ids

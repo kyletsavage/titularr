@@ -17,7 +17,7 @@ class Candidate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     source: Literal["tmdb"]
-    kind: Literal["movie"]
+    kind: Literal["movie", "series"]
     tmdb_id: int
     title: str
     original_title: str | None

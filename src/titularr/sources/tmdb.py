@@ -1,20 +1,13 @@
-"""TMDB (The Movie Database) as a title source.
+"""TMDB (The Movie Database) as a title source, for both movies and series.
 
-Try a search against the real API (needs your TMDB "API Read Access Token"):
-
-    uv run python -m titularr.sources.tmdb "christmas" [--adult exclude|include|only]
-
-with the token in the TMDB_API_TOKEN environment variable.
+To try it against the real API, see `python -m titularr.sources --help`.
 """
 
-import argparse
 import logging
-import os
-import sys
 import time
 from collections.abc import Iterator
 from types import TracebackType
-from typing import Any, Self, get_args
+from typing import Any, Self
 
 import httpx2
 from pydantic import BaseModel, ValidationError
@@ -35,16 +28,24 @@ class TmdbError(Exception):
     """TMDB returned an error, or a response we couldn't understand."""
 
 
-class _MovieResult(BaseModel):
-    # TMDB omits fields for sparse entries (e.g. no votes yet), so only id and title are required.
+class _Result(BaseModel):
+    """Fields shared by movie and series results. Only `id` (and the name) are required,
+    because TMDB omits fields for sparse entries (e.g. no votes yet)."""
+
     id: int
-    title: str
-    original_title: str | None = None
-    release_date: str | None = None  # "YYYY-MM-DD", or "" when unknown
     original_language: str | None = None
     vote_average: float | None = None
     vote_count: int | None = None
     adult: bool | None = None
+
+    def to_candidate(self) -> Candidate:
+        raise NotImplementedError
+
+
+class _MovieResult(_Result):
+    title: str
+    original_title: str | None = None
+    release_date: str | None = None  # "YYYY-MM-DD", or "" when unknown
 
     def to_candidate(self) -> Candidate:
         return Candidate(
@@ -61,11 +62,33 @@ class _MovieResult(BaseModel):
         )
 
 
+class _SeriesResult(_Result):
+    # TMDB calls these name/original_name/first_air_date for TV, where movies use
+    # title/original_title/release_date.
+    name: str
+    original_name: str | None = None
+    first_air_date: str | None = None  # "YYYY-MM-DD", or "" when unknown
+
+    def to_candidate(self) -> Candidate:
+        return Candidate(
+            source="tmdb",
+            kind="series",
+            tmdb_id=self.id,
+            title=self.name,
+            original_title=self.original_name,
+            year=_year(self.first_air_date),
+            original_language=self.original_language,
+            vote_average=self.vote_average,
+            vote_count=self.vote_count,
+            adult=self.adult,
+        )
+
+
 class _SearchPage(BaseModel):
     page: int
     total_pages: int
     total_results: int
-    # Validated one by one in search_movies, so a single bad entry is skipped, not fatal.
+    # Validated one by one in _search, so a single bad entry is skipped, not fatal.
     results: list[dict[str, Any]]
 
 
@@ -91,7 +114,12 @@ def _error_message(response: httpx2.Response) -> str:
 
 
 class TmdbClient:
-    """Searches TMDB. Use as a context manager so the connection is closed."""
+    """Searches TMDB. Use as a context manager so the connection is closed.
+
+    For every search, `adult` controls adult titles: "exclude" (default), "include", or
+    "only". TMDB itself only supports include on/off, so "only" fetches everything and
+    keeps the results TMDB marks as adult.
+    """
 
     def __init__(self, token: str, *, transport: httpx2.BaseTransport | None = None) -> None:
         self._client = httpx2.Client(
@@ -116,26 +144,31 @@ class TmdbClient:
         self._client.close()
 
     def search_movies(self, query: str, *, adult: AdultMode = "exclude") -> Iterator[Candidate]:
-        """Yield every movie TMDB returns for `query`, fetching page after page.
+        """Yield every movie TMDB returns for `query`, fetching page after page."""
+        return self._search("/search/movie", _MovieResult, query, adult)
 
-        `adult` controls adult titles: "exclude" (default), "include", or "only".
-        TMDB itself only supports include on/off, so "only" fetches everything and
-        keeps the results TMDB marks as adult.
-        """
+    def search_series(self, query: str, *, adult: AdultMode = "exclude") -> Iterator[Candidate]:
+        """Yield every TV series TMDB returns for `query`, fetching page after page."""
+        return self._search("/search/tv", _SeriesResult, query, adult)
+
+    def _search(
+        self, path: str, result_model: type[_Result], query: str, adult: AdultMode
+    ) -> Iterator[Candidate]:
         include_adult = adult != "exclude"
         page = 1
         while True:
-            data = self._get_page("/search/movie", query, page, include_adult)
+            data = self._get_page(path, query, page, include_adult)
             if page == 1 and data.total_pages > MAX_PAGES:
                 log.warning(
-                    "TMDB reports %d pages for %r; only the first %d can be fetched",
+                    "TMDB reports %d pages for %r at %s; only the first %d can be fetched",
                     data.total_pages,
                     query,
+                    path,
                     MAX_PAGES,
                 )
             for raw in data.results:
                 try:
-                    result = _MovieResult.model_validate(raw)
+                    result = result_model.model_validate(raw)
                 except ValidationError as e:
                     log.warning("skipping TMDB result without a usable id/title: %s", e)
                     continue
@@ -164,64 +197,3 @@ class TmdbClient:
         if response.is_error:
             raise TmdbError(_error_message(response))
         return response.json()
-
-
-class _WarningCounter(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.count = 0
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.count += 1
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="python -m titularr.sources.tmdb", description="Search TMDB for movies."
-    )
-    parser.add_argument("query", help="text to search for")
-    parser.add_argument(
-        "--adult",
-        choices=get_args(AdultMode),
-        default="exclude",
-        help="adult titles: exclude (default), include, or only",
-    )
-    args = parser.parse_args(argv)
-
-    token = os.environ.get("TMDB_API_TOKEN")
-    if not token:
-        print("Set TMDB_API_TOKEN to your TMDB API Read Access Token.", file=sys.stderr)
-        return 2
-
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    # Titles can contain characters the terminal's encoding can't show (e.g. a Windows
-    # console redirected to a file); replace them instead of crashing.
-    sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
-
-    warnings = _WarningCounter()
-    log.addHandler(warnings)
-    count = 0
-    status = 0
-    try:
-        with TmdbClient(token) as tmdb:
-            for movie in tmdb.search_movies(args.query, adult=args.adult):
-                year = movie.year if movie.year is not None else "?"
-                votes = movie.vote_count if movie.vote_count is not None else "?"
-                print(f"{movie.title} ({year})  tmdb:{movie.tmdb_id}  votes:{votes}")
-                count += 1
-    except (TmdbError, httpx2.HTTPError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        status = 1
-    finally:
-        log.removeHandler(warnings)
-    # Printed even after an error, so a partial run still shows how far it got.
-    print(f"{_plural(count, 'result')}, {_plural(warnings.count, 'warning')}")
-    return status
-
-
-def _plural(n: int, word: str) -> str:
-    return f"{n} {word}" if n == 1 else f"{n} {word}s"
-
-
-if __name__ == "__main__":
-    sys.exit(main())
