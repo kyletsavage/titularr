@@ -9,15 +9,42 @@ from titularr.sources import tmdb
 TOKEN = "test-token-123"
 
 MOVIES = [
-    {"id": 1, "title": "A Christmas Story", "release_date": "1983-11-18", "vote_count": 2900},
-    {"id": 2, "title": "Christmastime", "release_date": "2012-12-01", "vote_count": 4},
-    {"id": 3, "title": "Secret Santa", "release_date": "2015-12-04", "vote_count": 12},
+    {
+        "id": 1,
+        "title": "A Christmas Story",
+        "release_date": "1983-11-18",
+        "original_language": "en",
+        "vote_average": 7.3,
+        "vote_count": 2900,
+    },
+    {
+        "id": 2,
+        "title": "Christmastime",
+        "release_date": "2012-12-01",
+        "original_language": "en",
+        "vote_average": 5.0,
+        "vote_count": 4,
+    },
+    {"id": 3, "title": "Secret Santa", "release_date": "2015-12-04", "original_language": "en"},
     {"id": 4, "title": "Adult Christmas", "release_date": "2010-01-01", "adult": True},
 ]
 SERIES = [
-    {"id": 10, "name": "Christmas Wars", "first_air_date": "2022-12-13"},
+    {
+        "id": 10,
+        "name": "Christmas Wars",
+        "first_air_date": "2022-12-13",
+        "original_language": "en",
+        "vote_average": 6.4,
+        "vote_count": 85,
+    },
     {"id": 11, "name": "Holiday Baking", "first_air_date": "2015-05-05"},
 ]
+
+STORY = "[movie] A Christmas Story (1983)  tmdb:1  lang:en  rating:7.3  votes:2900"
+CHRISTMASTIME = "[movie] Christmastime (2012)  tmdb:2  lang:en  rating:5.0  votes:4"
+ADULT = "[movie] Adult Christmas (2010)  tmdb:4  lang:?  rating:?  votes:?"
+WARS = "[series] Christmas Wars (2022)  tmdb:10  lang:en  rating:6.4  votes:85"
+BAKING = "[series] Holiday Baking (2015)  tmdb:11  lang:?  rating:?  votes:?"
 
 
 def install_fake_tmdb(monkeypatch, handler):
@@ -49,6 +76,9 @@ def run(capsys, *args):
     return status, capsys.readouterr().out.splitlines()
 
 
+# --- searching and matching ---
+
+
 def test_default_searches_both_kinds_and_matches_substring(fake_tmdb, capsys):
     status, out = run(capsys, "christmas")
 
@@ -56,24 +86,20 @@ def test_default_searches_both_kinds_and_matches_substring(fake_tmdb, capsys):
     assert [r.url.path for r in fake_tmdb] == ["/3/search/movie", "/3/search/tv"]
     assert all(r.url.params["include_adult"] == "false" for r in fake_tmdb)
     assert all(r.url.params["query"] == "christmas" for r in fake_tmdb)
+    # English only by default, so "Adult Christmas" (language unknown) isn't kept.
     assert out == [
-        "[movie] A Christmas Story (1983)  tmdb:1  votes:2900",
-        "[movie] Christmastime (2012)  tmdb:2  votes:4",
-        "[movie] Adult Christmas (2010)  tmdb:4  votes:?",
-        "[series] Christmas Wars (2022)  tmdb:10  votes:?",
-        "4 movies found, 3 matched; 2 series found, 1 matched; 0 warnings",
+        STORY,
+        CHRISTMASTIME,
+        WARS,
+        "4 movies found, 3 matched, 2 kept; 2 series found, 1 matched, 1 kept; 0 warnings",
     ]
 
 
 def test_match_word_drops_partial_words(fake_tmdb, capsys):
-    status, out = run(capsys, "christmas", "--kind", "movie", "--match", "word")
+    status, out = run(capsys, "christmas", "--kind", "movie", "--match", "word", "--any-language")
 
     assert status == 0
-    assert out == [
-        "[movie] A Christmas Story (1983)  tmdb:1  votes:2900",
-        "[movie] Adult Christmas (2010)  tmdb:4  votes:?",
-        "4 movies found, 2 matched; 0 warnings",
-    ]
+    assert out == [STORY, ADULT, "4 movies found, 2 matched; 0 warnings"]
 
 
 def test_regex_replaces_the_search_text_for_matching(fake_tmdb, capsys):
@@ -81,21 +107,7 @@ def test_regex_replaces_the_search_text_for_matching(fake_tmdb, capsys):
 
     assert status == 0
     assert fake_tmdb[0].url.params["query"] == "christmas"  # still what TMDB searches
-    assert out == [
-        "[movie] Christmastime (2012)  tmdb:2  votes:4",
-        "4 movies found, 1 matched; 0 warnings",
-    ]
-
-
-def test_show_unmatched_lists_everything(fake_tmdb, capsys):
-    status, out = run(capsys, "christmas", "--kind", "series", "--show-unmatched")
-
-    assert status == 0
-    assert out == [
-        "[series] Christmas Wars (2022)  tmdb:10  votes:?",
-        "[series] Holiday Baking (2015)  tmdb:11  votes:? (no match)",
-        "2 series found, 1 matched; 0 warnings",
-    ]
+    assert out == [CHRISTMASTIME, "4 movies found, 1 matched, 1 kept; 0 warnings"]
 
 
 @pytest.mark.parametrize(
@@ -110,14 +122,126 @@ def test_kind_searches_only_one(fake_tmdb, capsys, kind, expected_paths):
 
 
 def test_adult_only_applies_to_both_kinds(fake_tmdb, capsys):
-    status, out = run(capsys, "christmas", "--adult", "only")
+    status, out = run(capsys, "christmas", "--adult", "only", "--any-language")
 
     assert status == 0
     assert all(r.url.params["include_adult"] == "true" for r in fake_tmdb)
+    assert out == [ADULT, "1 movie found, 1 matched; 0 series found, 0 matched; 0 warnings"]
+
+
+# --- filters ---
+
+
+def test_filters_add_a_kept_count(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--min-votes", "50")
+
+    assert status == 0
     assert out == [
-        "[movie] Adult Christmas (2010)  tmdb:4  votes:?",
-        "1 movie found, 1 matched; 0 series found, 0 matched; 0 warnings",
+        STORY,
+        WARS,
+        "4 movies found, 3 matched, 1 kept; 2 series found, 1 matched, 1 kept; 0 warnings",
     ]
+
+
+def test_year_and_language_filters(fake_tmdb, capsys):
+    args = ["christmas", "--kind", "movie", "--year-min", "1980", "--year-max", "1999"]
+    status, out = run(capsys, *args, "--language", "en")
+
+    assert status == 0
+    assert out == [STORY, "4 movies found, 3 matched, 1 kept; 0 warnings"]
+
+
+def test_min_rating_filter(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "series", "--min-rating", "6")
+
+    assert status == 0
+    assert out == [WARS, "2 series found, 1 matched, 1 kept; 0 warnings"]
+
+
+def test_keep_unknown(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--min-votes", "50", "--keep-unknown")
+
+    assert status == 0
+    assert out == [STORY, ADULT, "4 movies found, 3 matched, 2 kept; 0 warnings"]
+
+
+def test_show_dropped_gives_reasons(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--min-votes", "50", "--show-dropped")
+
+    assert status == 0
+    assert out == [
+        STORY,
+        CHRISTMASTIME + " (filtered: votes 4 < 50)",
+        "[movie] Secret Santa (2015)  tmdb:3  lang:en  rating:?  votes:? (no match)",
+        ADULT + " (filtered: language unknown; votes unknown)",
+        "4 movies found, 3 matched, 1 kept; 0 warnings",
+    ]
+
+
+def test_show_dropped_lists_non_matches(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "series", "--show-dropped")
+
+    assert status == 0
+    assert out == [WARS, BAKING + " (no match)", "2 series found, 1 matched, 1 kept; 0 warnings"]
+
+
+# --- language default ---
+
+
+def test_default_language_is_english(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--show-dropped")
+
+    assert status == 0
+    assert out[2:4] == [
+        "[movie] Secret Santa (2015)  tmdb:3  lang:en  rating:?  votes:? (no match)",
+        ADULT + " (filtered: language unknown)",
+    ]
+
+
+def test_language_replaces_the_default(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--language", "ja", "--show-dropped")
+
+    assert status == 0
+    assert out[0] == STORY + " (filtered: language en not in ja)"
+    assert out[-1] == "4 movies found, 3 matched, 0 kept; 0 warnings"
+
+
+def test_any_language_turns_the_language_filter_off(fake_tmdb, capsys):
+    status, out = run(capsys, "christmas", "--kind", "movie", "--any-language")
+
+    assert status == 0
+    assert out == [STORY, CHRISTMASTIME, ADULT, "4 movies found, 3 matched; 0 warnings"]
+
+
+def test_language_and_any_language_cannot_be_combined(fake_tmdb, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["christmas", "--language", "en", "--any-language"])
+
+    assert excinfo.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+    assert fake_tmdb == []
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--year-min", "2000", "--year-max", "1990"], "year_min (2000) is after year_max (1990)"),
+        (["--min-rating", "11"], "min_rating: Input should be less than or equal to 10"),
+        (["--min-votes", "-5"], "min_votes: Input should be greater than or equal to 0"),
+        (["--language", ""], "language codes must not be empty"),
+        (["--year-min", "soon"], "invalid int value"),
+    ],
+)
+def test_invalid_filters_are_rejected_before_any_request(fake_tmdb, capsys, args, message):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["christmas", *args])
+
+    assert excinfo.value.code == 2
+    assert message in capsys.readouterr().err
+    assert fake_tmdb == []
+
+
+# --- errors and argument handling ---
 
 
 def test_warnings_are_counted(monkeypatch, capsys):
@@ -129,7 +253,7 @@ def test_warnings_are_counted(monkeypatch, capsys):
 
     install_fake_tmdb(monkeypatch, handler)
 
-    status, out = run(capsys, "elf")
+    status, out = run(capsys, "elf", "--any-language")
     assert status == 0
     assert out[-1] == "1 movie found, 1 matched; 0 series found, 0 matched; 1 warning"
 
@@ -141,7 +265,7 @@ def test_error_still_prints_summary(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Error: TMDB returned HTTP 401" in captured.err
     assert captured.out.splitlines() == [
-        "0 movies found, 0 matched; 0 series found, 0 matched; 0 warnings"
+        "0 movies found, 0 matched, 0 kept; 0 series found, 0 matched, 0 kept; 0 warnings"
     ]
 
 

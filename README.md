@@ -78,7 +78,8 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 - [x] TMDB movie search (all result pages)
 - [x] TMDB series search
 - [x] Title matching (substring, word, regex)
-- [ ] Filters (year, language, rating, votes, runtime)
+- [x] Filters (year, language, rating, votes)
+- [ ] Runtime filter (needs a lookup per title)
 - [ ] Exclusions
 - [ ] Config file loading and dry-run output
 - [ ] Radarr and Sonarr library awareness (skip titles you already have)
