@@ -64,7 +64,8 @@ def fake_tmdb(monkeypatch):
         requests.append(request)
         results = MOVIES if request.url.path.endswith("/movie") else SERIES
         return httpx2.Response(
-            200, json={"page": 1, "total_pages": 1, "total_results": 4, "results": results}
+            200,
+            json={"page": 1, "total_pages": 1, "total_results": len(results), "results": results},
         )
 
     install_fake_tmdb(monkeypatch, handler)
@@ -324,7 +325,8 @@ def test_warnings_are_counted(monkeypatch, capsys):
     def handler(request):
         results = [{"id": 1, "title": "Elf"}, {"id": 2}] if "movie" in request.url.path else []
         return httpx2.Response(
-            200, json={"page": 1, "total_pages": 1, "total_results": 2, "results": results}
+            200,
+            json={"page": 1, "total_pages": 1, "total_results": len(results), "results": results},
         )
 
     install_fake_tmdb(monkeypatch, handler)
