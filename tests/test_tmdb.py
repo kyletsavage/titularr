@@ -23,11 +23,13 @@ def movie(id, title, release_date="2001-12-01", **overrides):
     }
 
 
-def search_page(page, total_pages, results):
+def search_page(page, total_pages, results, total_results=None):
+    """A TMDB search response. By default total_results assumes every page holds as many
+    results as this one, which keeps the fake data consistent (a complete search)."""
     return {
         "page": page,
         "total_pages": total_pages,
-        "total_results": total_pages * 20,
+        "total_results": len(results) * total_pages if total_results is None else total_results,
         "results": results,
     }
 
@@ -58,7 +60,7 @@ def test_fetches_every_page_in_order():
 
     def handler(request):
         page = int(request.url.params["page"])
-        return httpx2.Response(200, json=search_page(page, 2, pages[page]))
+        return httpx2.Response(200, json=search_page(page, 2, pages[page], total_results=3))
 
     client, requests = client_for(handler)
     results = list(client.search_movies("christmas"))
@@ -163,18 +165,177 @@ def test_result_without_id_or_title_is_skipped(caplog):
     assert caplog.text.count("skipping TMDB result") == 2
 
 
-def test_stops_at_500_pages_and_warns(caplog):
+def full_page(page, total_pages, total_results):
+    """A page of 20 distinct movies, as TMDB serves them."""
+    results = [movie(page * 100 + i, f"Movie {page}-{i}") for i in range(20)]
+    return search_page(page, total_pages, results, total_results=total_results)
+
+
+def test_stops_at_the_page_cap_and_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr(tmdb, "MAX_PAGES", 3)
+
     def handler(request):
         page = int(request.url.params["page"])
-        return httpx2.Response(200, json=search_page(page, 750, [movie(page, f"Movie {page}")]))
+        return httpx2.Response(200, json=full_page(page, 5, 100))
 
     client, requests = client_for(handler)
     with caplog.at_level(logging.WARNING):
         results = list(client.search_movies("the"))
 
-    assert len(requests) == 500
-    assert len(results) == 500
-    assert "750 pages" in caplog.text
+    # The cap (3 pages x 20) is the most that can be returned, so no re-fetch happens.
+    assert len(requests) == 3
+    assert len(results) == 60
+    assert caplog.text.count("5 pages") == 1
+    assert "may be missing" not in caplog.text
+
+
+# --- results TMDB's paging drops ---
+
+
+@pytest.fixture
+def years(monkeypatch):
+    """Limit year-by-year searches to 2000-2002 so tests stay small."""
+    monkeypatch.setattr(tmdb, "_years", lambda: range(2000, 2003))
+
+
+def tmdb_with_years(main_pages, year_results, total_results, year_param="primary_release_year"):
+    """A handler serving a normal search (main_pages[page] = ids) and year searches
+    (year_results[year] = ids, one page each)."""
+
+    def handler(request):
+        params = request.url.params
+        if year_param in params:
+            ids = year_results.get(int(params[year_param]), [])
+            page, total_pages, total = 1, 1, len(ids)
+        else:
+            page = int(params["page"])
+            ids = main_pages[page]
+            total_pages, total = len(main_pages), total_results
+        make = series if "/tv" in request.url.path else movie
+        results = [make(i, f"Title {i}") for i in ids]
+        return httpx2.Response(
+            200, json=search_page(page, total_pages, results, total_results=total)
+        )
+
+    return handler
+
+
+def year_requests(requests, param="primary_release_year"):
+    return [int(r.url.params[param]) for r in requests if param in r.url.params]
+
+
+def test_duplicate_on_two_pages_is_yielded_once(years):
+    handler = tmdb_with_years({1: [1, 2], 2: [2, 3]}, {2001: [4]}, total_results=4)
+    client, _ = client_for(handler)
+    assert [m.tmdb_id for m in client.search_movies("x")] == [1, 2, 3, 4]
+
+
+def test_complete_search_makes_no_year_requests(years):
+    handler = tmdb_with_years({1: [1, 2], 2: [3, 4]}, {2001: [5]}, total_results=4)
+    client, requests = client_for(handler)
+
+    assert [m.tmdb_id for m in client.search_movies("x")] == [1, 2, 3, 4]
+    assert len(requests) == 2
+    assert year_requests(requests) == []
+
+
+def test_short_search_recovers_missing_titles_year_by_year(years, caplog):
+    # Paging returns 2 twice and never 4; the year searches find 4 (and repeats of 1, 3).
+    handler = tmdb_with_years(
+        {1: [1, 2], 2: [2, 3]}, {2000: [1], 2001: [4, 3], 2002: []}, total_results=4
+    )
+    client, requests = client_for(handler)
+
+    with caplog.at_level(logging.INFO):
+        results = list(client.search_movies("christmas"))
+
+    assert [m.tmdb_id for m in results] == [1, 2, 3, 4]
+    assert year_requests(requests) == [2000, 2001, 2002]
+    assert "returned 3 of 4 results for 'christmas' at /search/movie" in caplog.text
+    assert "year-by-year search found 1 more" in caplog.text
+    assert "may be missing" not in caplog.text
+
+
+def test_still_short_after_year_searches_warns_once(years, caplog):
+    handler = tmdb_with_years({1: [1, 2], 2: [2, 3]}, {2001: [3]}, total_results=5)
+    client, _ = client_for(handler)
+
+    with caplog.at_level(logging.WARNING):
+        results = list(client.search_movies("christmas"))
+
+    assert [m.tmdb_id for m in results] == [1, 2, 3]
+    assert (
+        "expected 5 results for 'christmas' at /search/movie but only 3 were returned, "
+        "even year by year; 2 may be missing"
+    ) in caplog.text
+    assert caplog.text.count("may be missing") == 1
+
+
+def test_series_year_search_uses_first_air_date_year(years):
+    handler = tmdb_with_years(
+        {1: [1, 1]}, {2002: [2]}, total_results=2, year_param="first_air_date_year"
+    )
+    client, requests = client_for(handler)
+
+    assert [s.tmdb_id for s in client.search_series("x")] == [1, 2]
+    assert year_requests(requests, "first_air_date_year") == [2000, 2001, 2002]
+    assert all("/search/tv" in str(r.url) for r in requests)
+
+
+def test_skipped_and_adult_filtered_results_count_toward_completeness(years, caplog):
+    results = [
+        movie(1, "Regular", adult=False),
+        {"id": 2},  # no title: skipped, but TMDB counted it
+        movie(3, "Adult", adult=True),
+        {"title": "No id"},  # can't be de-duplicated; counted once
+    ]
+
+    def handler(request):
+        return httpx2.Response(200, json=search_page(1, 1, results))
+
+    client, requests = client_for(handler)
+    with caplog.at_level(logging.WARNING):
+        found = list(client.search_movies("x", adult="only"))
+
+    assert [m.tmdb_id for m in found] == [3]
+    assert len(requests) == 1  # complete: 4 of 4, no year searches
+    assert "may be missing" not in caplog.text
+
+
+def test_capped_search_is_complete_at_the_cap(monkeypatch, years, caplog):
+    monkeypatch.setattr(tmdb, "MAX_PAGES", 2)
+
+    def handler(request):
+        page = int(request.url.params["page"])
+        return httpx2.Response(200, json=full_page(page, 5, 100))
+
+    client, requests = client_for(handler)
+    with caplog.at_level(logging.WARNING):
+        results = list(client.search_movies("the"))
+
+    assert len(results) == 40
+    assert year_requests(requests) == []  # the cap is the most that can be returned
+    assert caplog.text.count("5 pages") == 1
+
+
+def test_cap_warning_is_logged_once_with_year_searches(monkeypatch, years, caplog):
+    monkeypatch.setattr(tmdb, "MAX_PAGES", 2)
+
+    def handler(request):
+        params = request.url.params
+        if "primary_release_year" in params:
+            # Each year search is also over the cap, so it would warn again if allowed.
+            return httpx2.Response(200, json=search_page(1, 9, [], total_results=0))
+        page = int(params["page"])
+        results = [movie(page * 100 + i, f"Movie {page}-{i}") for i in range(10)]
+        return httpx2.Response(200, json=search_page(page, 5, results, total_results=100))
+
+    client, _ = client_for(handler)
+    with caplog.at_level(logging.WARNING):
+        list(client.search_movies("the"))
+
+    assert caplog.text.count("only the first 2 can be fetched") == 1
+    assert "expected 40 results" in caplog.text
 
 
 def test_retries_after_rate_limit(no_sleep):
