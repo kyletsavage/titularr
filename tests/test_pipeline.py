@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
 from titularr.models import Candidate, Decision
-from titularr.pipeline import Query, Summary, decide, run
+from titularr.pipeline import Library, Query, Summary, decide, run
 
 
 def candidate(tmdb_id=1, title="A Christmas Story", kind="movie", language="en", votes=2900):
@@ -223,3 +223,46 @@ def test_empty_layers_exclude_nothing():
 def test_query_rejects_unknown_fields():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Query(text="christmas", filter={"min_votes": 5})
+
+
+# --- library check ---
+
+
+def test_kept_title_in_the_library_is_in_library():
+    library = Library(movie_ids=frozenset({1}))
+    assert decide(Query(text="christmas"), candidate(1), library).status == "in_library"
+    assert decide(Query(text="christmas"), candidate(2), library).status == "kept"
+
+
+def test_library_only_applies_to_the_matching_kind():
+    library = Library(movie_ids=frozenset({1}))
+    series = candidate(1, kind="series")
+    assert decide(Query(text="christmas"), series, library).status == "kept"
+    assert not library.checks("series")
+
+
+def test_filtered_and_excluded_titles_keep_their_reasons_even_in_the_library():
+    library = Library(movie_ids=frozenset({1, 2}))
+    query = Query(
+        text="christmas",
+        filters=Filters(min_votes=5000),
+        exclusions=Exclusions(ids={"movie:2"}),
+    )
+    assert decide(query, candidate(1), library).status == "filtered"
+    assert decide(query, candidate(2), library).status == "excluded"
+
+
+def test_unchecked_library_leaves_titles_kept():
+    assert decide(Query(text="christmas"), candidate(1), Library()).status == "kept"
+    assert decide(Query(text="christmas"), candidate(1)).status == "kept"
+
+
+def test_run_and_summary_count_in_library():
+    source = FakeSource(movies=[candidate(1), candidate(2)])
+    query = Query(text="christmas", kinds=("movie",))
+    summary = Summary(kinds=query.kinds)
+    for decision in run(query, source, Library(movie_ids=frozenset({2}))):
+        summary.add(decision)
+
+    counts = summary.counts["movie"]
+    assert (counts.found, counts.matched, counts.kept, counts.in_library) == (2, 2, 1, 1)

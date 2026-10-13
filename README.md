@@ -37,6 +37,13 @@ sources:
   tmdb:
     token: ${TMDB_API_TOKEN}
 
+radarr:                # optional: skip movies you already have
+  url: http://radarr:7878
+  api_key: ${RADARR_API_KEY}
+sonarr:                # optional: skip series you already have
+  url: http://sonarr:8989
+  api_key: ${SONARR_API_KEY}
+
 exclusions:            # never keep these, in any query ("global" exclusions)
   ids: [movie:1399]
   titles: [sing-along]
@@ -53,7 +60,9 @@ queries:
       titles: [parody]
 ```
 
-Unknown keys are reported as errors, so typos don't go unnoticed. Radarr and Sonarr settings arrive with library awareness, the next roadmap step after the CLI.
+Unknown keys are reported as errors, so typos don't go unnoticed.
+
+**Radarr and Sonarr are optional.** With them configured, previews leave out titles you already have (shown as `in library` with `--show-dropped`). Titularr only *reads* your libraries. Find each API key under Settings → General → Security. If a `radarr:` or `sonarr:` section is present but can't be used (say, its API key variable isn't set), you get a warning and that library check is skipped. Series that Sonarr has no TMDB ID for can't be recognized, and a warning lists them.
 
 ## Usage
 
@@ -71,7 +80,7 @@ uv run titularr run holiday-movies
 # One-off search; see `uv run titularr search --help` for every option
 uv run titularr search "star trek" --kind series --min-votes 100
 
-# Also list what was dropped, and why
+# Also list what was dropped, and why (no match, excluded, filtered, in library)
 uv run titularr run holiday-movies --show-dropped
 ```
 
@@ -91,7 +100,7 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [ ] Runtime filter (needs a lookup per title)
 - [x] Exclusions per run (TMDB IDs, title patterns)
 - [x] Config file and preview output (`titularr search` / `run` / `validate`)
-- [ ] Radarr and Sonarr library awareness (skip titles you already have)
+- [x] Radarr and Sonarr library awareness (skip titles you already have, read-only)
 - [ ] Run history (SQLite)
 - [ ] Adding matches to Radarr and Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs for series)
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)

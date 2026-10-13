@@ -545,7 +545,10 @@ def test_validate_summarizes_a_valid_config(fake_tmdb, tmp_path):
 
     assert status == 0
     assert out == [
-        "config.yaml is valid: 1 saved query (christmas-movies), 1 global exclusion rule"
+        (
+            "config.yaml is valid: 1 saved query (christmas-movies), 1 global exclusion rule, "
+            "library check: none"
+        )
     ]
     assert fake_tmdb == []  # never contacts TMDB
 
@@ -582,3 +585,143 @@ def test_help_lists_the_commands():
 def test_titularr_console_script_is_installed():
     (script,) = [e for e in entry_points(group="console_scripts") if e.name == "titularr"]
     assert script.value == "titularr.cli:app"
+
+
+# --- library check (Radarr / Sonarr) ---
+
+ARR_CONFIG = """\
+sources:
+  tmdb:
+    token: config-token
+radarr:
+  url: http://radarr:7878
+  api_key: radarr-key
+sonarr:
+  url: http://sonarr:8989
+  api_key: sonarr-key
+"""
+
+
+@pytest.fixture
+def fake_arr(monkeypatch):
+    """Fake Radarr (has movie 1) and Sonarr (has series 10, plus one without a TMDB ID).
+
+    Returns the requests made to either app.
+    """
+    from titularr import arr
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/movie"):
+            return httpx2.Response(200, json=[{"tmdbId": 1, "title": "A Christmas Story"}])
+        return httpx2.Response(
+            200,
+            json=[{"tmdbId": 10, "title": "Christmas Wars"}, {"tmdbId": 0, "title": "Old Show"}],
+        )
+
+    for name in ("RadarrClient", "SonarrClient"):
+        real = getattr(arr, name)
+        monkeypatch.setattr(
+            cli,
+            name,
+            lambda url, key, real=real: real(url, key, transport=httpx2.MockTransport(handler)),
+        )
+    return requests
+
+
+def test_titles_in_the_library_are_dropped_and_counted(fake_tmdb, fake_arr, tmp_path):
+    write_config(tmp_path / "config.yaml", ARR_CONFIG)
+    status, out, err = invoke("search", "christmas")
+
+    assert status == 0
+    assert [r.headers["X-Api-Key"] for r in fake_arr] == ["radarr-key", "sonarr-key"]
+    assert out == [
+        CHRISTMASTIME,
+        (
+            "4 movies found, 3 matched, 1 kept, 1 in library; "
+            "2 series found, 1 matched, 0 kept, 1 in library; 1 warning"
+        ),
+    ]
+    assert "1 series in Sonarr has no TMDB ID and can't be recognized in results: Old Show" in err
+
+
+def test_show_dropped_marks_in_library(fake_tmdb, fake_arr, tmp_path):
+    write_config(tmp_path / "config.yaml", ARR_CONFIG)
+    status, out, _ = invoke("search", "christmas", "--kind", "movie", "--show-dropped")
+
+    assert status == 0
+    assert out[0] == STORY + " (in library)"
+
+
+def test_only_the_searched_kinds_library_is_fetched(fake_tmdb, fake_arr, tmp_path):
+    write_config(tmp_path / "config.yaml", ARR_CONFIG)
+    status, out, err = invoke("search", "christmas", "--kind", "movie")
+
+    assert status == 0
+    assert [r.url.path for r in fake_arr] == ["/api/v3/movie"]
+    assert "Sonarr" not in err  # no "no TMDB ID" warning for a movies-only search
+    assert out[-1] == "4 movies found, 3 matched, 1 kept, 1 in library; 0 warnings"
+
+
+def test_arr_error_stops_before_any_tmdb_request(fake_tmdb, monkeypatch, tmp_path):
+    from titularr import arr
+
+    real = arr.RadarrClient
+    monkeypatch.setattr(
+        cli,
+        "RadarrClient",
+        lambda url, key: real(
+            url, key, transport=httpx2.MockTransport(lambda r: httpx2.Response(401))
+        ),
+    )
+    write_config(tmp_path / "config.yaml", ARR_CONFIG)
+    status, out, err = invoke("search", "christmas", "--kind", "movie")
+
+    assert status == 1
+    assert "Error: Radarr returned HTTP 401: check the api_key in your config" in err
+    assert "radarr-key" not in err
+    assert fake_tmdb == []
+    assert out == []
+
+
+def test_no_arr_config_means_no_library_check(fake_tmdb, fake_arr, tmp_path):
+    write_config(tmp_path / "config.yaml")  # CONFIG has no radarr/sonarr sections
+    status, out, _ = invoke("search", "christmas", "--kind", "movie", "--any-language")
+
+    assert status == 0
+    assert fake_arr == []
+    assert "in library" not in out[-1]
+
+
+def test_unusable_sonarr_section_warns_only_for_series(fake_tmdb, fake_arr, tmp_path, monkeypatch):
+    monkeypatch.delenv("UNSET_SONARR_KEY", raising=False)
+    text = ARR_CONFIG.replace("api_key: sonarr-key", "api_key: ${UNSET_SONARR_KEY}")
+    write_config(tmp_path / "config.yaml", text)
+    warning = "sonarr is in the config but can't be used (UNSET_SONARR_KEY is not set)"
+
+    status, _, err = invoke("search", "christmas", "--kind", "movie")
+    assert status == 0
+    assert warning not in err
+
+    status, out, err = invoke("search", "christmas", "--kind", "series")
+    assert status == 0
+    assert warning in err
+    assert all(r.url.path != "/api/v3/series" for r in fake_arr)
+    # No library check ("in library" missing), and the run still completes.
+    assert out[-1] == "2 series found, 1 matched, 1 kept; 1 warning"
+
+
+def test_validate_lists_library_checks_and_warnings(fake_arr, tmp_path, monkeypatch):
+    monkeypatch.delenv("UNSET_SONARR_KEY", raising=False)
+    text = ARR_CONFIG.replace("api_key: sonarr-key", "api_key: ${UNSET_SONARR_KEY}")
+    write_config(tmp_path / "config.yaml", text)
+    status, out, err = invoke("validate")
+
+    assert status == 0
+    assert out == [
+        "config.yaml is valid: 0 saved queries, 0 global exclusion rules, library check: Radarr"
+    ]
+    assert "WARNING: sonarr is in the config but can't be used" in err
+    assert fake_arr == []  # validate never contacts the apps
