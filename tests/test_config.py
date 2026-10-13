@@ -179,3 +179,90 @@ def test_resolve_path_order(monkeypatch, tmp_path):
     assert resolve_config_path(None) == tmp_path / "from-env.yaml"
     monkeypatch.delenv("TITULARR_CONFIG")
     assert resolve_config_path(None) == Path("config.yaml")
+
+
+# --- radarr / sonarr sections ---
+
+
+def test_arr_sections_are_optional(write):
+    config = load_config(write(MINIMAL))
+    assert config.radarr is None and config.sonarr is None
+    assert config.warnings == ()
+
+
+def test_arr_sections_load(write, monkeypatch):
+    monkeypatch.setenv("RADARR_API_KEY", "r-key")
+    text = (
+        MINIMAL
+        + "radarr:\n  url: http://radarr:7878/\n  api_key: ${RADARR_API_KEY}\n"
+        + "sonarr:\n  url: https://host/sonarr\n  api_key: s-key\n"
+    )
+    config = load_config(write(text))
+
+    assert config.radarr.url == "http://radarr:7878"  # trailing slash dropped
+    assert config.radarr.api_key == "r-key"
+    assert config.sonarr.url == "https://host/sonarr"
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("section", "problem"),
+    [
+        ("radarr:\n  url: http://radarr:7878\n", "api_key is missing"),
+        ("radarr:\n  api_key: k\n", "url is missing"),
+        ("radarr:\n  url: ''\n  api_key: k\n", "url is missing"),
+        ("radarr:\n  url: http://r\n  api_key: '  '\n", "api_key is missing"),
+        ("radarr:\n", "it has no settings"),
+        (
+            "radarr:\n  url: http://r\n  api_key: ${UNSET_RADARR_KEY}\n",
+            "UNSET_RADARR_KEY is not set",
+        ),
+    ],
+)
+def test_unusable_arr_section_is_a_warning(write, monkeypatch, section, problem):
+    monkeypatch.delenv("UNSET_RADARR_KEY", raising=False)
+    config = load_config(write(MINIMAL + section))
+
+    assert config.radarr is None
+    assert config.warnings == (
+        (
+            f"radarr is in the config but can't be used ({problem}); "
+            "movies won't be checked against your library"
+        ),
+    )
+
+
+def test_empty_env_variable_counts_as_empty(write, monkeypatch):
+    monkeypatch.setenv("EMPTY_KEY", "")
+    config = load_config(write(MINIMAL + "sonarr:\n  url: http://s\n  api_key: ${EMPTY_KEY}\n"))
+    assert config.sonarr is None
+    assert "api_key is empty" in config.warnings[0]
+    assert "series won't be checked" in config.warnings[0]
+
+
+def test_unset_variable_outside_arr_sections_is_still_an_error(write, monkeypatch):
+    monkeypatch.delenv("UNSET_TOKEN", raising=False)
+    with pytest.raises(ConfigError, match="UNSET_TOKEN is not set"):
+        load_config(write(MINIMAL.replace("abc", "${UNSET_TOKEN}")))
+
+
+@pytest.mark.parametrize(
+    ("section", "message"),
+    [
+        ("radarr:\n  url: radarr:7878\n  api_key: k\n", "url must start with http:// or https://"),
+        (
+            "radarr:\n  url: http://r\n  apikey: k\n",
+            "radarr.apikey: Extra inputs are not permitted",
+        ),
+        ("radarr: http://r\n", "radarr"),
+    ],
+)
+def test_malformed_arr_section_is_still_an_error(write, section, message):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write(MINIMAL + section))
+    assert message in str(excinfo.value)
+
+
+def test_warnings_cant_be_set_from_the_file(write):
+    with pytest.raises(ConfigError, match="warnings: Extra inputs are not permitted"):
+        load_config(write(MINIMAL + "warnings: [hi]\n"))

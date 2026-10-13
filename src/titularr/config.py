@@ -1,7 +1,8 @@
-"""The YAML config file: the TMDB token, global exclusions and saved queries.
+"""The YAML config file: the TMDB token, Radarr/Sonarr connections, global exclusions
+and saved queries.
 
 String values may reference environment variables as ${NAME}; that's how secrets such
-as the TMDB token stay out of the file. See config.example.yaml.
+as API keys stay out of the file. See config.example.yaml.
 """
 
 import os
@@ -10,7 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+)
 
 from titularr.exclusions import Exclusions
 from titularr.pipeline import Query
@@ -39,11 +47,39 @@ class Sources(_Strict):
     tmdb: TmdbSettings
 
 
+class ArrSettings(_Strict):
+    """How to reach Radarr or Sonarr. Titularr only reads from them for now."""
+
+    url: str
+    api_key: str = Field(min_length=1)
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"url must start with http:// or https:// (got {value!r})")
+        return value.rstrip("/")
+
+
+# Which kind of title each app's library covers.
+_ARR_KINDS = {"radarr": "movies", "sonarr": "series"}
+
+
 class Config(_Strict):
     sources: Sources
+    radarr: ArrSettings | None = None
+    sonarr: ArrSettings | None = None
     # Applies to every query, as a separate "global" layer next to the query's own.
     exclusions: Exclusions = Exclusions()
     queries: dict[str, Query] = {}
+
+    # Problems that don't stop the config from loading (e.g. a radarr section that
+    # can't be used). Set by load_config, not from the file.
+    _warnings: tuple[str, ...] = PrivateAttr(default=())
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        return self._warnings
 
     @field_validator("queries")
     @classmethod
@@ -93,13 +129,47 @@ def load_config(path: Path) -> Config:
     if not isinstance(data, dict):
         raise ConfigError(f"{path} should contain settings (a YAML mapping) at the top level")
 
+    # Radarr/Sonarr sections that are present but can't be used (missing settings or
+    # unset variables) become warnings, so the rest of Titularr still works.
+    warnings: list[str] = []
+    for app, kinds in _ARR_KINDS.items():
+        if app in data and (problem := _unusable(data[app])):
+            warnings.append(
+                f"{app} is in the config but can't be used ({problem}); "
+                f"{kinds} won't be checked against your library"
+            )
+            del data[app]
+
     # Expanded after parsing, so a value containing YAML-special characters (as a
     # secret might) can't change the file's structure.
     data = _expand_env(data, path)
     try:
-        return Config.model_validate(data)
+        config = Config.model_validate(data)
     except ValidationError as e:
         raise ConfigError(f"{path} has invalid settings:\n{_describe(e)}") from e
+    config._warnings = tuple(warnings)
+    return config
+
+
+def _unusable(section: Any) -> str | None:
+    """Why a radarr/sonarr section can't be used, or None if it can (or is malformed:
+    unknown keys and bad values are left for validation to report as errors)."""
+    if section is None:
+        return "it has no settings"
+    if not isinstance(section, dict) or set(section) - {"url", "api_key"}:
+        return None
+    problems = []
+    for key in ("url", "api_key"):
+        value = section.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            problems.append(f"{key} is missing")
+        elif isinstance(value, str):
+            unset = [n for n in _ENV_REFERENCE.findall(value) if n not in os.environ]
+            if unset:
+                problems.extend(f"{name} is not set" for name in unset)
+            elif not _ENV_REFERENCE.sub(lambda m: os.environ[m.group(1)], value).strip():
+                problems.append(f"{key} is empty")  # e.g. RADARR_API_KEY set to ""
+    return "; ".join(problems) or None
 
 
 def _expand_env(value: Any, path: Path) -> Any:

@@ -10,8 +10,8 @@ AdultMode = Literal["exclude", "include", "only"]
 Kind = Literal["movie", "series"]
 """What a title is: a movie (added to Radarr) or a series (added to Sonarr)."""
 
-Status = Literal["kept", "no_match", "excluded", "filtered"]
-"""What a run decided about a title."""
+Status = Literal["kept", "no_match", "excluded", "filtered", "in_library"]
+"""What a run decided about a title. "kept" means it would be added."""
 
 
 class Candidate(BaseModel):

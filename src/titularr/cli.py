@@ -14,11 +14,12 @@ import httpx2
 import typer
 from pydantic import ValidationError
 
+from titularr.arr import ArrError, RadarrClient, SonarrClient
 from titularr.config import Config, ConfigError, load_config, resolve_config_path
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
 from titularr.models import AdultMode, Candidate, Decision
-from titularr.pipeline import Query, Summary, run
+from titularr.pipeline import Library, Query, Summary, run
 from titularr.sources.tmdb import TmdbClient, TmdbError
 
 app = typer.Typer(
@@ -168,7 +169,7 @@ def search(
     token = loaded.sources.tmdb.token if loaded else os.environ.get("TMDB_API_TOKEN")
     if not token:
         _usage_error("set TMDB_API_TOKEN to your TMDB API Read Access Token, or use a config file")
-    _preview(query, token, show_dropped)
+    _preview(query, token, show_dropped, loaded)
 
 
 @app.command(name="run")
@@ -184,22 +185,26 @@ def run_saved(
         query = loaded.query(name)
     except ConfigError as e:
         _usage_error(str(e))
-    _preview(query, loaded.sources.tmdb.token, show_dropped)
+    _preview(query, loaded.sources.tmdb.token, show_dropped, loaded)
 
 
 @app.command()
 def validate(config: ConfigOption = None) -> None:
-    """Check the config file without contacting TMDB."""
+    """Check the config file without contacting TMDB, Radarr or Sonarr."""
     path = resolve_config_path(config)
     loaded = _load_config(path, required=True)
     assert loaded is not None
+    for warning in loaded.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
     names = sorted(loaded.queries)
     rules = len(loaded.exclusions.ids) + len(loaded.exclusions.titles)
     rules += len(loaded.exclusions.regexes)
     listed = f" ({', '.join(names)})" if names else ""
+    apps = [name for name, s in (("Radarr", loaded.radarr), ("Sonarr", loaded.sonarr)) if s]
     print(
         f"{path} is valid: {_plural(len(names), 'saved query', 'saved queries')}{listed}, "
-        f"{_plural(rules, 'global exclusion rule', 'global exclusion rules')}"
+        f"{_plural(rules, 'global exclusion rule', 'global exclusion rules')}, "
+        f"library check: {', '.join(apps) or 'none'}"
     )
 
 
@@ -214,7 +219,7 @@ def _load_config(explicit: Path | None, *, required: bool) -> Config | None:
         _usage_error(str(e))
 
 
-def _preview(query: Query, token: str, show_dropped: bool) -> None:
+def _preview(query: Query, token: str, show_dropped: bool, config: Config | None) -> None:
     """Run the query, print the kept (and optionally dropped) titles, then a summary."""
     # Titles can contain characters the terminal's encoding can't show (e.g. a Windows
     # console redirected to a file); replace them instead of crashing.
@@ -233,12 +238,19 @@ def _preview(query: Query, token: str, show_dropped: bool) -> None:
     package_log.addHandler(console)
     package_log.addHandler(warnings)
     status = 0
+    library = Library()
     try:
+        # Fetched once, before searching, so a bad URL or API key fails fast.
+        library = _load_library(query, config)
         with TmdbClient(token) as tmdb:
-            for decision in run(query, tmdb):
+            for decision in run(query, tmdb, library):
                 summary.add(decision)
                 if decision.status == "kept" or show_dropped:
                     print(_describe_candidate(decision.candidate) + _why_dropped(decision))
+    except ArrError as e:
+        # Before any TMDB request, so there's no summary to show.
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(1) from e
     except (TmdbError, httpx2.HTTPError) as e:
         print(f"Error: {e}", file=sys.stderr)
         status = 1
@@ -254,13 +266,47 @@ def _preview(query: Query, token: str, show_dropped: bool) -> None:
         part = f"{_plural(counts.found, one, many)} found, {counts.matched} matched"
         if excludes:
             part += f", {counts.excluded} excluded"
-        if query.filters.active or excludes:
+        if query.filters.active or excludes or library.checks(kind):
             part += f", {counts.kept} kept"
+        if library.checks(kind):
+            part += f", {counts.in_library} in library"
         parts.append(part)
     parts.append(_plural(warnings.count, "warning", "warnings"))
     print("; ".join(parts))
     if status:
         raise typer.Exit(status)
+
+
+def _load_library(query: Query, config: Config | None) -> Library:
+    """What's already in Radarr/Sonarr, for the kinds this query searches."""
+    if config is None:
+        return Library()
+    log = logging.getLogger("titularr")
+    for warning in config.warnings:
+        # Only mention an app whose kind this query actually searches.
+        app_kind = "movie" if warning.startswith("radarr") else "series"
+        if app_kind in query.kinds:
+            log.warning(warning)
+
+    movie_ids = series_ids = None
+    if "movie" in query.kinds and config.radarr:
+        with RadarrClient(config.radarr.url, config.radarr.api_key) as radarr:
+            movie_ids = frozenset(radarr.library_tmdb_ids())
+    if "series" in query.kinds and config.sonarr:
+        with SonarrClient(config.sonarr.url, config.sonarr.api_key) as sonarr:
+            sonarr_library = sonarr.library()
+        series_ids = sonarr_library.tmdb_ids
+        if missing := sonarr_library.titles_without_tmdb_id:
+            shown = ", ".join(missing[:10])
+            more = f" and {len(missing) - 10} more" if len(missing) > 10 else ""
+            log.warning(
+                "%s in Sonarr %s no TMDB ID and can't be recognized in results: %s%s",
+                _plural(len(missing), "series", "series"),
+                "has" if len(missing) == 1 else "have",
+                shown,
+                more,
+            )
+    return Library(movie_ids=movie_ids, series_ids=series_ids)
 
 
 class _WarningCounter(logging.Handler):
@@ -285,6 +331,8 @@ def _why_dropped(decision: Decision) -> str:
         return f" (excluded: {decision.reasons[0]})"
     if decision.status == "filtered":
         return f" (filtered: {'; '.join(decision.reasons)})"
+    if decision.status == "in_library":
+        return " (in library)"
     return ""
 
 

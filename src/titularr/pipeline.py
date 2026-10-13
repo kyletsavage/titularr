@@ -83,8 +83,33 @@ class Query(BaseModel):
         return [("global", self.global_exclusions), ("query", self.exclusions)]
 
 
-def decide(query: Query, candidate: Candidate) -> Decision:
-    """Match, then exclusions, then filters. An excluded title isn't filtered."""
+@dataclass(frozen=True)
+class Library:
+    """TMDB IDs already in Radarr (movies) and Sonarr (series).
+
+    None for a kind means its library wasn't checked (that app isn't configured).
+    """
+
+    movie_ids: frozenset[int] | None = None
+    series_ids: frozenset[int] | None = None
+
+    def checks(self, kind: Kind) -> bool:
+        return self.ids(kind) is not None
+
+    def ids(self, kind: Kind) -> frozenset[int] | None:
+        return self.movie_ids if kind == "movie" else self.series_ids
+
+    def has(self, candidate: Candidate) -> bool:
+        ids = self.ids(candidate.kind)
+        return ids is not None and candidate.tmdb_id in ids
+
+
+def decide(query: Query, candidate: Candidate, library: Library | None = None) -> Decision:
+    """Match, then exclusions, then filters, then the library check.
+
+    An excluded title isn't filtered, and only titles that would otherwise be kept are
+    checked against the library: "kept" means it would be added.
+    """
     if not query.matches(candidate):
         return Decision(candidate=candidate, status="no_match")
     for label, exclusions in query.exclusion_layers():
@@ -92,15 +117,17 @@ def decide(query: Query, candidate: Candidate) -> Decision:
             return Decision(candidate=candidate, status="excluded", reasons=(f"{label}: {reason}",))
     if reasons := query.filters.reasons(candidate):
         return Decision(candidate=candidate, status="filtered", reasons=tuple(reasons))
+    if library is not None and library.has(candidate):
+        return Decision(candidate=candidate, status="in_library")
     return Decision(candidate=candidate, status="kept")
 
 
-def run(query: Query, source: TitleSource) -> Iterator[Decision]:
+def run(query: Query, source: TitleSource, library: Library | None = None) -> Iterator[Decision]:
     """Search for each kind in turn and yield a decision per candidate as it arrives."""
     for kind in query.kinds:
         search = source.search_movies if kind == "movie" else source.search_series
         for candidate in search(query.text, adult=query.adult):
-            yield decide(query, candidate)
+            yield decide(query, candidate, library)
 
 
 @dataclass
@@ -109,11 +136,13 @@ class KindCounts:
     matched: int = 0
     excluded: int = 0
     kept: int = 0
+    in_library: int = 0
 
 
 @dataclass
 class Summary:
-    """Running counts per kind. Every matched title is excluded, filtered or kept."""
+    """Running counts per kind. Every matched title is excluded, filtered, in the
+    library, or kept."""
 
     kinds: tuple[Kind, ...] = ("movie", "series")
     counts: dict[Kind, KindCounts] = field(default_factory=dict)
@@ -131,3 +160,5 @@ class Summary:
             counts.excluded += 1
         elif decision.status == "kept":
             counts.kept += 1
+        elif decision.status == "in_library":
+            counts.in_library += 1

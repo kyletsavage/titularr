@@ -5,6 +5,17 @@ sources:
   tmdb:
     token: ${TMDB_API_TOKEN}   # your TMDB "API Read Access Token"
 
+# Your Radarr / Sonarr, so previews can skip titles you already have ("in library").
+# Titularr only reads from them. API key: Settings > General > Security in each app.
+# Uncomment the apps you use. A section that's present but can't be used (e.g. its
+# API key variable isn't set) gives a warning, and that library check is skipped.
+# radarr:
+#   url: http://radarr:7878
+#   api_key: ${RADARR_API_KEY}
+# sonarr:
+#   url: http://sonarr:8989
+#   api_key: ${SONARR_API_KEY}
+
 # Never keep these titles, in any query. Checked alongside each query's own exclusions;
 # excluded titles say which list excluded them ("global:" or "query:").
 exclusions:
