@@ -1,5 +1,6 @@
 """Tests for the `titularr` command (search, run, validate)."""
 
+import re
 from importlib.metadata import entry_points
 
 import httpx2
@@ -103,10 +104,19 @@ def fake_tmdb(monkeypatch):
     return requests
 
 
+_ANSI_CODE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def invoke(*args):
-    """Run `titularr ARGS`; returns (exit code, stdout lines, stderr)."""
+    """Run `titularr ARGS`; returns (exit code, stdout lines, stderr).
+
+    Color codes are removed: Rich adds them when the environment asks for color (as
+    CI does), and they can split text such as an option name in Typer's error box.
+    """
     result = runner.invoke(cli.app, list(args))
-    return result.exit_code, result.stdout.splitlines(), result.stderr
+    stdout = _ANSI_CODE.sub("", result.stdout)
+    stderr = _ANSI_CODE.sub("", result.stderr)
+    return result.exit_code, stdout.splitlines(), stderr
 
 
 def write_config(path, text=CONFIG):
