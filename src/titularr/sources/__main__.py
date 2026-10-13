@@ -27,8 +27,8 @@ from pydantic import ValidationError
 
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
-from titularr.matching import TitleMatcher
-from titularr.models import AdultMode, Candidate
+from titularr.models import AdultMode, Candidate, Decision
+from titularr.pipeline import Query, Summary, run
 from titularr.sources.tmdb import TmdbClient, TmdbError
 
 _KIND_WORDS = {"movie": ("movie", "movies"), "series": ("series", "series")}
@@ -124,13 +124,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Invalid input exits with status 2 here, before any request is made.
-    try:
-        if args.regex is not None:
-            matcher = TitleMatcher("regex", args.regex)
-        else:
-            matcher = TitleMatcher(args.match, args.query)
-    except ValueError as e:
-        parser.error(str(e))
     settings = {
         "year_min": args.year_min,
         "year_max": args.year_max,
@@ -144,11 +137,18 @@ def main(argv: list[str] | None = None) -> int:
     elif args.language is not None:
         settings["languages"] = frozenset(args.language)
     try:
-        keep = Filters(**settings)
-        exclude = Exclusions(
-            ids=frozenset(args.exclude_id),
-            titles=tuple(args.exclude_title),
-            regexes=tuple(args.exclude_regex),
+        query = Query(
+            text=args.query,
+            kinds=("movie", "series") if args.kind == "both" else (args.kind,),
+            match="regex" if args.regex is not None else args.match,
+            pattern=args.regex,
+            adult=args.adult,
+            filters=Filters(**settings),
+            exclusions=Exclusions(
+                ids=frozenset(args.exclude_id),
+                titles=tuple(args.exclude_title),
+                regexes=tuple(args.exclude_regex),
+            ),
         )
     except ValidationError as e:
         parser.error(_describe(e))
@@ -163,35 +163,17 @@ def main(argv: list[str] | None = None) -> int:
     # console redirected to a file); replace them instead of crashing.
     sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
 
-    kinds = ["movie", "series"] if args.kind == "both" else [args.kind]
-    found = dict.fromkeys(kinds, 0)
-    matched = dict.fromkeys(kinds, 0)
-    excluded = dict.fromkeys(kinds, 0)
-    kept = dict.fromkeys(kinds, 0)
+    summary = Summary(kinds=query.kinds)
     warnings = _WarningCounter()
     package_log = logging.getLogger("titularr")
     package_log.addHandler(warnings)
     status = 0
     try:
         with TmdbClient(token) as tmdb:
-            search = {"movie": tmdb.search_movies, "series": tmdb.search_series}
-            for kind in kinds:
-                for c in search[kind](args.query, adult=args.adult):
-                    found[kind] += 1
-                    if not matcher.matches(c):
-                        dropped = " (no match)"
-                    else:
-                        matched[kind] += 1
-                        if reason := exclude.reason(c):
-                            excluded[kind] += 1
-                            dropped = f" (excluded: {reason})"
-                        elif reasons := keep.reasons(c):
-                            dropped = f" (filtered: {'; '.join(reasons)})"
-                        else:
-                            kept[kind] += 1
-                            dropped = ""
-                    if not dropped or args.show_dropped:
-                        print(_describe_candidate(c) + dropped)
+            for decision in run(query, tmdb):
+                summary.add(decision)
+                if decision.status == "kept" or args.show_dropped:
+                    print(_describe_candidate(decision.candidate) + _why_dropped(decision))
     except (TmdbError, httpx2.HTTPError) as e:
         print(f"Error: {e}", file=sys.stderr)
         status = 1
@@ -200,17 +182,27 @@ def main(argv: list[str] | None = None) -> int:
 
     # Printed even after an error, so a partial run still shows how far it got.
     parts = []
-    for kind in kinds:
+    for kind, counts in summary.counts.items():
         one, many = _KIND_WORDS[kind]
-        part = f"{_plural(found[kind], one, many)} found, {matched[kind]} matched"
-        if exclude.active:
-            part += f", {excluded[kind]} excluded"
-        if keep.active or exclude.active:
-            part += f", {kept[kind]} kept"
+        part = f"{_plural(counts.found, one, many)} found, {counts.matched} matched"
+        if query.exclusions.active:
+            part += f", {counts.excluded} excluded"
+        if query.filters.active or query.exclusions.active:
+            part += f", {counts.kept} kept"
         parts.append(part)
     parts.append(_plural(warnings.count, "warning", "warnings"))
     print("; ".join(parts))
     return status
+
+
+def _why_dropped(decision: Decision) -> str:
+    if decision.status == "no_match":
+        return " (no match)"
+    if decision.status == "excluded":
+        return f" (excluded: {decision.reasons[0]})"
+    if decision.status == "filtered":
+        return f" (filtered: {'; '.join(decision.reasons)})"
+    return ""
 
 
 def _describe_candidate(c: Candidate) -> str:
