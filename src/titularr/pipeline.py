@@ -31,9 +31,13 @@ class Query(BaseModel):
     `text` is what the source searches for. Titles are matched against `text` too
     (as a substring or whole word), unless `match` is "regex": then `pattern` is
     required and is what titles are matched against.
+
+    `exclusions` are this query's own; `global_exclusions` come from the config and
+    apply to every query. Both are checked, and each reason says which one applied.
     """
 
-    model_config = ConfigDict(frozen=True)
+    # extra="forbid": a typo like "filter" in a config file is an error, not ignored.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     text: str = Field(min_length=1)
     kinds: tuple[Kind, ...] = Field(default=("movie", "series"), min_length=1)
@@ -42,6 +46,7 @@ class Query(BaseModel):
     adult: AdultMode = "exclude"
     filters: Filters = Filters()
     exclusions: Exclusions = Exclusions()
+    global_exclusions: Exclusions = Exclusions()
 
     _matcher: TitleMatcher = PrivateAttr()
 
@@ -70,13 +75,21 @@ class Query(BaseModel):
     def matches(self, candidate: Candidate) -> bool:
         return self._matcher.matches(candidate)
 
+    def exclusion_layers(self) -> list[tuple[str, Exclusions]]:
+        """Exclusion lists in the order they're checked, each with its label.
+
+        The blacklist (SQLite + web UI, later) will be added here, first.
+        """
+        return [("global", self.global_exclusions), ("query", self.exclusions)]
+
 
 def decide(query: Query, candidate: Candidate) -> Decision:
     """Match, then exclusions, then filters. An excluded title isn't filtered."""
     if not query.matches(candidate):
         return Decision(candidate=candidate, status="no_match")
-    if reason := query.exclusions.reason(candidate):
-        return Decision(candidate=candidate, status="excluded", reasons=(reason,))
+    for label, exclusions in query.exclusion_layers():
+        if reason := exclusions.reason(candidate):
+            return Decision(candidate=candidate, status="excluded", reasons=(f"{label}: {reason}",))
     if reasons := query.filters.reasons(candidate):
         return Decision(candidate=candidate, status="filtered", reasons=tuple(reasons))
     return Decision(candidate=candidate, status="kept")

@@ -5,14 +5,17 @@
         [--year-min YEAR] [--year-max YEAR] [--language CODE ...]
         [--min-rating N] [--min-votes N] [--keep-unknown]
         [--exclude-id KIND:ID ...] [--exclude-title TEXT ...] [--exclude-regex PATTERN ...]
-        [--show-dropped]
+        [--config PATH] [--show-dropped]
+
+    uv run python -m titularr.sources --saved NAME [--config PATH] [--show-dropped]
 
 The search text is always what TMDB searches for. Matching then keeps only titles that
 contain it (substring, the default), contain it as a whole word (--match word), or
 match --regex PATTERN instead. Exclusions then drop titles that must never be kept, and
-filters narrow the rest; see --help.
+filters narrow the rest; see --help. --saved runs a query saved in the config file.
 
-Needs your TMDB "API Read Access Token" in the TMDB_API_TOKEN environment variable.
+Needs your TMDB "API Read Access Token": from the config file's sources.tmdb.token when
+a config is used, otherwise from the TMDB_API_TOKEN environment variable.
 Temporary: phase 3's real CLI replaces this.
 """
 
@@ -20,11 +23,13 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import get_args
 
 import httpx2
 from pydantic import ValidationError
 
+from titularr.config import Config, ConfigError, load_config, resolve_config_path
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
 from titularr.models import AdultMode, Candidate, Decision
@@ -32,6 +37,24 @@ from titularr.pipeline import Query, Summary, run
 from titularr.sources.tmdb import TmdbClient, TmdbError
 
 _KIND_WORDS = {"movie": ("movie", "movies"), "series": ("series", "series")}
+
+# Settings a saved query defines itself, so they can't be combined with --saved.
+_QUERY_FLAGS = [
+    "kind",
+    "match",
+    "regex",
+    "adult",
+    "year_min",
+    "year_max",
+    "language",
+    "any_language",
+    "min_rating",
+    "min_votes",
+    "keep_unknown",
+    "exclude_id",
+    "exclude_title",
+    "exclude_regex",
+]
 
 
 class _WarningCounter(logging.Handler):
@@ -47,7 +70,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m titularr.sources", description="Search TMDB for movies and series."
     )
-    parser.add_argument("query", help="text to search TMDB for (always required)")
+    parser.add_argument(
+        "query", nargs="?", help="text to search TMDB for (or use --saved NAME instead)"
+    )
+    parser.add_argument(
+        "--saved", metavar="NAME", help="run a query saved in the config file, by name"
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        metavar="PATH",
+        help="config file (default: $TITULARR_CONFIG, then ./config.yaml; "
+        "needed for --saved, otherwise optional)",
+    )
     parser.add_argument(
         "--kind",
         choices=["movie", "series", "both"],
@@ -124,36 +159,57 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Invalid input exits with status 2 here, before any request is made.
-    settings = {
-        "year_min": args.year_min,
-        "year_max": args.year_max,
-        "min_rating": args.min_rating,
-        "min_votes": args.min_votes,
-        "keep_unknown": args.keep_unknown,
-    }
-    # Leaving "languages" out keeps Filters' default (English only).
-    if args.any_language:
-        settings["languages"] = None
-    elif args.language is not None:
-        settings["languages"] = frozenset(args.language)
-    try:
-        query = Query(
-            text=args.query,
-            kinds=("movie", "series") if args.kind == "both" else (args.kind,),
-            match="regex" if args.regex is not None else args.match,
-            pattern=args.regex,
-            adult=args.adult,
-            filters=Filters(**settings),
-            exclusions=Exclusions(
-                ids=frozenset(args.exclude_id),
-                titles=tuple(args.exclude_title),
-                regexes=tuple(args.exclude_regex),
-            ),
-        )
-    except ValidationError as e:
-        parser.error(_describe(e))
+    if (args.query is None) == (args.saved is None):
+        parser.error("give either search text or --saved NAME (exactly one)")
+    if args.saved is not None:
+        changed = [f for f in _QUERY_FLAGS if getattr(args, f) != parser.get_default(f)]
+        if changed:
+            flags = ", ".join("--" + f.replace("_", "-") for f in changed)
+            parser.error(f"--saved runs a saved query as-is; it can't be combined with {flags}")
 
-    token = os.environ.get("TMDB_API_TOKEN")
+    config: Config | None = None
+    if args.config is not None or args.saved is not None:
+        try:
+            config = load_config(resolve_config_path(args.config))
+            if args.saved is not None:
+                query = config.query(args.saved)
+        except ConfigError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+
+    if args.saved is None:
+        settings = {
+            "year_min": args.year_min,
+            "year_max": args.year_max,
+            "min_rating": args.min_rating,
+            "min_votes": args.min_votes,
+            "keep_unknown": args.keep_unknown,
+        }
+        # Leaving "languages" out keeps Filters' default (English only).
+        if args.any_language:
+            settings["languages"] = None
+        elif args.language is not None:
+            settings["languages"] = frozenset(args.language)
+        try:
+            query = Query(
+                text=args.query,
+                kinds=("movie", "series") if args.kind == "both" else (args.kind,),
+                match="regex" if args.regex is not None else args.match,
+                pattern=args.regex,
+                adult=args.adult,
+                filters=Filters(**settings),
+                exclusions=Exclusions(
+                    ids=frozenset(args.exclude_id),
+                    titles=tuple(args.exclude_title),
+                    regexes=tuple(args.exclude_regex),
+                ),
+                # A config's exclusions apply to every search, including ad-hoc ones.
+                global_exclusions=config.exclusions if config else Exclusions(),
+            )
+        except ValidationError as e:
+            parser.error(_describe(e))
+
+    token = config.sources.tmdb.token if config else os.environ.get("TMDB_API_TOKEN")
     if not token:
         print("Set TMDB_API_TOKEN to your TMDB API Read Access Token.", file=sys.stderr)
         return 2
@@ -181,13 +237,14 @@ def main(argv: list[str] | None = None) -> int:
         package_log.removeHandler(warnings)
 
     # Printed even after an error, so a partial run still shows how far it got.
+    excludes = any(layer.active for _, layer in query.exclusion_layers())
     parts = []
     for kind, counts in summary.counts.items():
         one, many = _KIND_WORDS[kind]
         part = f"{_plural(counts.found, one, many)} found, {counts.matched} matched"
-        if query.exclusions.active:
+        if excludes:
             part += f", {counts.excluded} excluded"
-        if query.filters.active or query.exclusions.active:
+        if query.filters.active or excludes:
             part += f", {counts.kept} kept"
         parts.append(part)
     parts.append(_plural(warnings.count, "warning", "warnings"))

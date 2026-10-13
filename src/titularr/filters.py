@@ -15,13 +15,14 @@ class Filters(BaseModel):
     """Which titles to keep.
 
     By default only English-language titles are kept (`languages={"en"}`); pass
-    `languages=None` for any language. Every other filter is off unless set.
+    `languages=None` (or "any") for any language. Every other filter is off unless set.
 
     When a filter is set but a title's value is unknown (e.g. TMDB has no vote count),
     the title is dropped unless `keep_unknown` is set.
     """
 
-    model_config = ConfigDict(frozen=True)
+    # extra="forbid": a typo like "min_vote" in a config file is an error, not ignored.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     year_min: int | None = None
     year_max: int | None = None
@@ -31,6 +32,14 @@ class Filters(BaseModel):
     min_rating: float | None = Field(default=None, ge=0, le=10)
     min_votes: int | None = Field(default=None, ge=0)
     keep_unknown: bool = False
+
+    @field_validator("languages", mode="before")
+    @classmethod
+    def _any_language(cls, value: object) -> object:
+        # "languages: any" reads better in a config file than "languages: null".
+        if isinstance(value, str) and value.strip().lower() == "any":
+            return None
+        return value
 
     @field_validator("languages")
     @classmethod

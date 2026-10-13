@@ -280,7 +280,7 @@ def test_exclusion_takes_priority_over_filter_reasons(fake_tmdb, capsys):
     assert status == 0
     assert out == [
         STORY,
-        CHRISTMASTIME + ' (excluded: title "christmastime")',
+        CHRISTMASTIME + ' (excluded: query: title "christmastime")',
         "[movie] Secret Santa (2015)  tmdb:3  lang:en  rating:?  votes:? (no match)",
         ADULT + " (filtered: language unknown; votes unknown)",
         "4 movies found, 3 matched, 1 excluded, 1 kept; 0 warnings",
@@ -379,3 +379,100 @@ def test_requires_token(monkeypatch, capsys):
     monkeypatch.delenv("TMDB_API_TOKEN", raising=False)
     assert cli.main(["christmas"]) == 2
     assert "TMDB_API_TOKEN" in capsys.readouterr().err
+
+
+# --- config file: --config and --saved ---
+
+CONFIG = """\
+sources:
+  tmdb:
+    token: config-token
+exclusions:
+  ids: [movie:2]
+queries:
+  christmas-movies:
+    text: christmas
+    kinds: [movie]
+    match: word
+    exclusions:
+      titles: [story]
+"""
+
+
+@pytest.fixture
+def config_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("TITULARR_CONFIG", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_bytes(CONFIG.encode("utf-8"))
+    return path
+
+
+def test_saved_query_runs_with_the_config_token(fake_tmdb, capsys, config_file):
+    status, out = run(capsys, "--config", str(config_file), "--saved", "christmas-movies")
+
+    assert status == 0
+    assert [r.url.path for r in fake_tmdb] == ["/3/search/movie"]
+    assert all(r.headers["Authorization"] == "Bearer config-token" for r in fake_tmdb)
+    # word match keeps "A Christmas Story" and "Adult Christmas"; the query's own
+    # exclusion drops the first, the English default drops the second.
+    assert out == ["4 movies found, 2 matched, 1 excluded, 0 kept; 0 warnings"]
+
+
+def test_saved_query_shows_which_layer_excluded(fake_tmdb, capsys, config_file):
+    args = ["--config", str(config_file), "--saved", "christmas-movies", "--show-dropped"]
+    status, out = run(capsys, *args)
+
+    assert status == 0
+    assert out[0] == STORY + ' (excluded: query: title "story")'
+
+
+def test_config_exclusions_apply_to_ad_hoc_searches_as_global(fake_tmdb, capsys, config_file):
+    args = ["christmas", "--kind", "movie", "--config", str(config_file), "--show-dropped"]
+    status, out = run(capsys, *args)
+
+    assert status == 0
+    assert CHRISTMASTIME + " (excluded: global: id movie:2)" in out
+    assert out[-1] == "4 movies found, 3 matched, 1 excluded, 1 kept; 0 warnings"
+
+
+def test_saved_reads_config_from_env_variable(fake_tmdb, capsys, config_file, monkeypatch):
+    monkeypatch.setenv("TITULARR_CONFIG", str(config_file))
+    status, _ = run(capsys, "--saved", "christmas-movies")
+
+    assert status == 0
+    assert fake_tmdb[0].headers["Authorization"] == "Bearer config-token"
+
+
+def test_unknown_saved_name_lists_available(fake_tmdb, capsys, config_file):
+    assert cli.main(["--config", str(config_file), "--saved", "nope"]) == 2
+    assert "no saved query named 'nope' (available: christmas-movies)" in capsys.readouterr().err
+    assert fake_tmdb == []
+
+
+def test_saved_cant_be_combined_with_query_flags(fake_tmdb, capsys, config_file):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--config", str(config_file), "--saved", "christmas-movies", "--min-votes", "5"])
+
+    assert excinfo.value.code == 2
+    assert "can't be combined with --min-votes" in capsys.readouterr().err
+    assert fake_tmdb == []
+
+
+@pytest.mark.parametrize("args", [[], ["christmas", "--saved", "christmas-movies"]])
+def test_needs_exactly_one_of_text_or_saved(fake_tmdb, capsys, config_file, args):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main([*args, "--config", str(config_file)])
+
+    assert excinfo.value.code == 2
+    assert "give either search text or --saved NAME" in capsys.readouterr().err
+
+
+def test_config_error_exits_before_any_request(fake_tmdb, capsys, tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_bytes(
+        b"sources:\n  tmdb:\n    token: x\nqueries:\n  q:\n    text: x\n    filters:\n      min_votes: -1\n"
+    )
+
+    assert cli.main(["--config", str(bad), "--saved", "q"]) == 2
+    assert "queries.q.filters.min_votes" in capsys.readouterr().err
+    assert fake_tmdb == []

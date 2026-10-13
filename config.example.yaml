@@ -1,0 +1,34 @@
+# Titularr config. Copy this file to config.yaml and edit it.
+# ${NAME} is replaced with the environment variable NAME, so secrets stay out of the file.
+
+sources:
+  tmdb:
+    token: ${TMDB_API_TOKEN}   # your TMDB "API Read Access Token"
+
+# Never keep these titles, in any query. Checked alongside each query's own exclusions;
+# excluded titles say which list excluded them ("global:" or "query:").
+exclusions:
+  ids: [movie:1399]            # movie:<tmdb id> or series:<tmdb id>
+  titles: [sing-along]         # titles containing this text (ignoring case and accents)
+  # regexes: ['^the ']         # titles matching this regular expression
+
+# Saved queries, by name. Run one with: python -m titularr.sources --saved holiday-movies
+queries:
+  holiday-movies:
+    text: christmas            # what TMDB searches for, and what titles must contain
+    kinds: [movie]             # movie and/or series (default: both)
+    match: word                # substring (default), word, or regex (needs pattern:)
+    filters:
+      year_min: 1940
+      min_votes: 500
+      # languages: [en]        # default: English only; "any" for every language
+
+  dracula:
+    text: dracula              # titles containing "dracula"...
+    kinds: [movie]
+    # match: regex             # ...or only exact "Dracula" / "Dracula 2000"-style titles:
+    # pattern: '^dracula( \d+)?$'
+    filters:
+      languages: any
+    exclusions:                # this query's own, checked after the global list
+      titles: [dead and loving]  # ...except the 1995 parody "Dracula: Dead and Loving It"
