@@ -55,22 +55,31 @@ queries:
 
 Unknown keys are reported as errors, so typos don't go unnoticed. Radarr and Sonarr settings arrive with library awareness, the next roadmap step after the CLI.
 
-## Usage (draft)
+## Usage
+
+Install with [uv](https://docs.astral.sh/uv/) from a clone of this repository, then run commands with `uv run`:
 
 ```bash
-# Preview matches without adding anything
-titularr run holiday-movies --dry-run
+uv sync
 
-# Add everything that matches
-titularr run holiday-movies
+# Check config.yaml without contacting TMDB
+uv run titularr validate
 
-# One-off search without a saved query
-titularr search "star trek" --targets sonarr --dry-run
+# Run a saved query from config.yaml
+uv run titularr run holiday-movies
+
+# One-off search; see `uv run titularr search --help` for every option
+uv run titularr search "star trek" --kind series --min-votes 100
+
+# Also list what was dropped, and why
+uv run titularr run holiday-movies --show-dropped
 ```
+
+**Every command is a preview:** it lists the titles a query keeps and never changes anything. Adding to Radarr and Sonarr will need an explicit `--apply`, so a forgotten flag can never bulk-add your library.
 
 ## A word of caution
 
-Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use filters to keep results relevant, and consider leaving `search_on_add` off until you've reviewed what landed in Radarr and Sonarr. Your indexers and your disks will thank you.
+Broad keywords can match a *lot* of titles. Review the preview first, use filters and exclusions to keep results relevant, and, once adding exists, consider leaving `search_on_add` off until you've reviewed what landed in Radarr and Sonarr. Your indexers and your disks will thank you.
 
 ## Roadmap
 
@@ -81,10 +90,10 @@ Broad keywords can match a *lot* of titles. Always start with `--dry-run`, use f
 - [x] Filters (year, language, rating, votes)
 - [ ] Runtime filter (needs a lookup per title)
 - [x] Exclusions per run (TMDB IDs, title patterns)
-- [ ] Config file loading (including saved exclusions) and dry-run output
+- [x] Config file and preview output (`titularr search` / `run` / `validate`)
 - [ ] Radarr and Sonarr library awareness (skip titles you already have)
 - [ ] Run history (SQLite)
-- [ ] Adding matches to Radarr and Sonarr (including the TVDB ID lookup Sonarr needs for series)
+- [ ] Adding matches to Radarr and Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs for series)
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
 - [ ] Saved queries and scheduling
 - [ ] Docker service with an HTTP API

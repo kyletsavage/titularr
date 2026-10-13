@@ -12,7 +12,7 @@ exclusions:
   titles: [sing-along]         # titles containing this text (ignoring case and accents)
   # regexes: ['^the ']         # titles matching this regular expression
 
-# Saved queries, by name. Run one with: python -m titularr.sources --saved holiday-movies
+# Saved queries, by name. Run one with: titularr run holiday-movies
 queries:
   holiday-movies:
     text: christmas            # what TMDB searches for, and what titles must contain

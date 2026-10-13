@@ -1,6 +1,6 @@
 """TMDB (The Movie Database) as a title source, for both movies and series.
 
-To try it against the real API, see `python -m titularr.sources --help`.
+To try it against the real API, see `titularr search --help`.
 """
 
 import datetime
