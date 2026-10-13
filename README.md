@@ -26,34 +26,34 @@ Radarr and Sonarr are built to add one title at a time, or to sync from curated 
 - **Saved queries** that can be re-run on a schedule to catch newly released matches
 - **Docker image** for easy deployment alongside the rest of your stack
 
-## Configuration (draft)
+## Configuration
 
-Configuration will likely be a YAML file plus environment variables for secrets. A rough sketch:
+Titularr reads a YAML file: `config.yaml` in the current folder, or the path in the `TITULARR_CONFIG` environment variable. Copy [`config.example.yaml`](config.example.yaml) to `config.yaml` to start. `config.yaml` is git-ignored, so your settings stay local.
+
+Secrets stay out of the file: any `${NAME}` is replaced with the environment variable `NAME`. Titularr searches [TMDB](https://www.themoviedb.org/), so you need a free TMDB account and its **API Read Access Token** (Settings → API), set as `TMDB_API_TOKEN`.
 
 ```yaml
-radarr:
-  url: http://radarr:7878
-  api_key: ${RADARR_API_KEY}
-  quality_profile: HD-1080p
-  root_folder: /movies
+sources:
+  tmdb:
+    token: ${TMDB_API_TOKEN}
 
-sonarr:
-  url: http://sonarr:8989
-  api_key: ${SONARR_API_KEY}
-  quality_profile: HD-1080p
-  root_folder: /tv
+exclusions:            # never keep these, in any query ("global" exclusions)
+  ids: [movie:1399]
+  titles: [sing-along]
 
 queries:
-  - name: holiday-movies
-    match: "christmas"
-    mode: word          # substring | word | regex
-    targets: [radarr]
+  holiday-movies:
+    text: christmas
+    kinds: [movie]     # movie and/or series (default: both)
+    match: word        # substring (default) | word | regex (with pattern:)
     filters:
       year_min: 1940
-      min_votes: 500
-    tags: [holiday]
-    search_on_add: false
+      min_votes: 500   # also: year_max, min_rating, languages (default: English), keep_unknown
+    exclusions:        # this query's own, checked after the global list
+      titles: [parody]
 ```
+
+Unknown keys are reported as errors, so typos don't go unnoticed. Radarr and Sonarr settings arrive with library awareness, the next roadmap step after the CLI.
 
 ## Usage (draft)
 

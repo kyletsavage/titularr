@@ -148,3 +148,15 @@ def test_active_when_any_filter_is_set():
     assert Filters(languages=None, min_votes=0).active
     assert Filters(languages={"ja"}).active
     assert not Filters(languages=None, keep_unknown=True).active
+
+
+@pytest.mark.parametrize("value", ["any", "ANY", " any "])
+def test_languages_any_means_any_language(value):
+    filters = Filters(languages=value)
+    assert filters.languages is None
+    assert filters.reasons(candidate(language="fr")) == []
+
+
+def test_filters_reject_unknown_fields():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Filters(min_vote=5)

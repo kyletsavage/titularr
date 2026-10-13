@@ -24,7 +24,8 @@ class Exclusions(BaseModel):
     - `regexes`: excluded if the regular expression matches (case-insensitive).
     """
 
-    model_config = ConfigDict(frozen=True)
+    # extra="forbid": a typo like "title" in a config file is an error, not ignored.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     ids: frozenset[str] = frozenset()
     titles: tuple[str, ...] = ()

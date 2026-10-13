@@ -114,7 +114,7 @@ def test_decide_excluded_beats_filter_reasons():
     )
     decision = decide(query, candidate(tmdb_id=1, votes=10))
     assert decision.status == "excluded"
-    assert decision.reasons == ("id movie:1",)
+    assert decision.reasons == ("query: id movie:1",)
 
 
 def test_decide_filtered_reports_every_reason():
@@ -189,3 +189,37 @@ def test_summary_lists_requested_kinds_even_when_empty():
     summary = Summary(kinds=("series",))
     assert list(summary.counts) == ["series"]
     assert summary.counts["series"].found == 0
+
+
+# --- exclusion layers ---
+
+
+def test_exclusions_say_which_layer_excluded_them():
+    query = Query(
+        text="christmas",
+        global_exclusions=Exclusions(ids={"movie:1"}),
+        exclusions=Exclusions(ids={"movie:2"}),
+    )
+    assert decide(query, candidate(1)).reasons == ("global: id movie:1",)
+    assert decide(query, candidate(2)).reasons == ("query: id movie:2",)
+    assert decide(query, candidate(3)).status == "kept"
+
+
+def test_global_layer_is_checked_first():
+    query = Query(
+        text="christmas",
+        global_exclusions=Exclusions(titles=("story",)),
+        exclusions=Exclusions(ids={"movie:1"}),
+    )
+    assert decide(query, candidate(1)).reasons == ('global: title "story"',)
+
+
+def test_empty_layers_exclude_nothing():
+    query = Query(text="christmas")
+    assert [label for label, _ in query.exclusion_layers()] == ["global", "query"]
+    assert decide(query, candidate()).status == "kept"
+
+
+def test_query_rejects_unknown_fields():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Query(text="christmas", filter={"min_votes": 5})

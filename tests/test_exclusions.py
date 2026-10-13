@@ -100,3 +100,8 @@ def test_active_when_any_rule_is_set():
     assert Exclusions(ids={"movie:1"}).active
     assert Exclusions(titles=("x",)).active
     assert Exclusions(regexes=("x",)).active
+
+
+def test_exclusions_reject_unknown_fields():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Exclusions(title=("x",))

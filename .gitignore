@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Titularr: real configs hold your settings; only config.example.yaml is committed
+/config.yaml
