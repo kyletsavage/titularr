@@ -37,9 +37,11 @@ sources:
   tmdb:
     token: ${TMDB_API_TOKEN}
 
-radarr:                # optional: skip movies you already have
+radarr:                # optional: skip movies you already have, and add with --apply
   url: http://radarr:7878
   api_key: ${RADARR_API_KEY}
+  quality_profile: HD-1080p   # needed for --apply; also: monitored, minimum_availability,
+  root_folder: /movies        # search_on_add (default: off)
 sonarr:                # optional: skip series you already have
   url: http://sonarr:8989
   api_key: ${SONARR_API_KEY}
@@ -58,11 +60,13 @@ queries:
       min_votes: 500   # also: year_max, min_rating, languages (default: English), keep_unknown
     exclusions:        # this query's own, checked after the global list
       titles: [parody]
+    radarr:            # this query's own add settings, replacing the radarr section's
+      root_folder: /holiday
 ```
 
 Unknown keys are reported as errors, so typos don't go unnoticed.
 
-**Radarr and Sonarr are optional.** With them configured, previews leave out titles you already have (shown as `in library` with `--show-dropped`). Titularr only *reads* your libraries. Find each API key under Settings → General → Security. If a `radarr:` or `sonarr:` section is present but can't be used (say, its API key variable isn't set), you get a warning and that library check is skipped. Series that Sonarr has no TMDB ID for can't be recognized, and a warning lists them.
+**Radarr and Sonarr are optional.** With them configured, previews leave out titles you already have (shown as `in library` with `--show-dropped`). Titularr only changes Radarr when you use `--apply`, and never changes Sonarr yet. Find each API key under Settings → General → Security. If a `radarr:` or `sonarr:` section is present but can't be used (say, its API key variable isn't set), you get a warning and that library check is skipped. Series that Sonarr has no TMDB ID for can't be recognized, and a warning lists them.
 
 ## Usage
 
@@ -82,13 +86,16 @@ uv run titularr search "star trek" --kind series --min-votes 100
 
 # Also list what was dropped, and why (no match, excluded, filtered, in library)
 uv run titularr run holiday-movies --show-dropped
+
+# Add the kept movies to Radarr, after a preview and a yes/no question
+uv run titularr run holiday-movies --apply
 ```
 
-**Every command is a preview:** it lists the titles a query keeps and never changes anything. Adding to Radarr and Sonarr will need an explicit `--apply`, so a forgotten flag can never bulk-add your library.
+**Every command is a preview** unless you add `--apply`, so a forgotten flag can never bulk-add your library. With `--apply`, Titularr shows the preview and then asks before adding the kept movies to Radarr. `--yes` skips the question, for scripts. Without `--yes`, `--apply` refuses to run where nobody can answer. Your quality profile and root folder are checked against Radarr before searching. If one movie fails to add, the rest are still added, and the failures are listed. Adding series to Sonarr comes next; for now, kept series are reported but not added.
 
 ## A word of caution
 
-Broad keywords can match a *lot* of titles. Review the preview first, use filters and exclusions to keep results relevant, and, once adding exists, consider leaving `search_on_add` off until you've reviewed what landed in Radarr and Sonarr. Your indexers and your disks will thank you.
+Broad keywords can match a *lot* of titles. Review the preview first, use filters and exclusions to keep results relevant, and leave `search_on_add` off (the default) until you've reviewed what landed in Radarr. Your indexers and your disks will thank you.
 
 ## Roadmap
 
@@ -102,7 +109,9 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [x] Config file and preview output (`titularr search` / `run` / `validate`)
 - [x] Radarr and Sonarr library awareness (skip titles you already have, read-only)
 - [ ] Run history (SQLite)
-- [ ] Adding matches to Radarr and Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs for series)
+- [x] Adding movies to Radarr with `--apply`
+- [ ] Adding series to Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs)
+- [ ] Tags on added titles
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
 - [ ] Saved queries and scheduling
 - [ ] Docker service with an HTTP API

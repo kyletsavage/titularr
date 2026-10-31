@@ -1,7 +1,7 @@
 """The `titularr` command: search TMDB and preview what each query would keep.
 
-Every command is a preview: nothing is added anywhere. Adding to Radarr/Sonarr comes
-later and will need an explicit --apply.
+Every command is a preview unless given --apply: then the kept movies are added to
+Radarr, after asking first (--yes skips asking). Adding series comes later.
 """
 
 import logging
@@ -14,7 +14,7 @@ import httpx2
 import typer
 from pydantic import ValidationError
 
-from titularr.arr import ArrError, RadarrClient, SonarrClient
+from titularr.arr import ArrError, RadarrAdd, RadarrAddOptions, RadarrClient, SonarrClient
 from titularr.config import Config, ConfigError, load_config, resolve_config_path
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
@@ -23,7 +23,8 @@ from titularr.pipeline import Library, Query, Summary, run
 from titularr.sources.tmdb import TmdbClient, TmdbError
 
 app = typer.Typer(
-    help="Find every movie and series whose title matches your keywords (preview only).",
+    help="Find every movie and series whose title matches your keywords, and add the movies "
+    "to Radarr with --apply.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -45,6 +46,14 @@ ShowDroppedOption = Annotated[
         help="Also list titles that didn't match, were excluded or were filtered out.",
     ),
 ]
+ApplyOption = Annotated[
+    bool,
+    typer.Option(
+        "--apply",
+        help="Add the kept movies to Radarr, after asking. Without it, nothing is changed.",
+    ),
+]
+YesOption = Annotated[bool, typer.Option("--yes", help="With --apply: add without asking first.")]
 
 
 @app.command()
@@ -121,6 +130,8 @@ def search(
     ] = None,
     config: ConfigOption = None,
     show_dropped: ShowDroppedOption = False,
+    apply: ApplyOption = False,
+    yes: YesOption = False,
 ) -> None:
     """Search TMDB once, with the rules given as options.
 
@@ -169,7 +180,8 @@ def search(
     token = loaded.sources.tmdb.token if loaded else os.environ.get("TMDB_API_TOKEN")
     if not token:
         _usage_error("set TMDB_API_TOKEN to your TMDB API Read Access Token, or use a config file")
-    _preview(query, token, show_dropped, loaded)
+    radarr_add = loaded.radarr_add() if loaded else None
+    _preview(query, token, show_dropped, loaded, apply=apply, yes=yes, radarr_add=radarr_add)
 
 
 @app.command(name="run")
@@ -177,6 +189,8 @@ def run_saved(
     name: Annotated[str, typer.Argument(help="Name of a query saved in the config file.")],
     config: ConfigOption = None,
     show_dropped: ShowDroppedOption = False,
+    apply: ApplyOption = False,
+    yes: YesOption = False,
 ) -> None:
     """Run a query saved in the config file."""
     loaded = _load_config(config, required=True)
@@ -185,7 +199,15 @@ def run_saved(
         query = loaded.query(name)
     except ConfigError as e:
         _usage_error(str(e))
-    _preview(query, loaded.sources.tmdb.token, show_dropped, loaded)
+    _preview(
+        query,
+        loaded.sources.tmdb.token,
+        show_dropped,
+        loaded,
+        apply=apply,
+        yes=yes,
+        radarr_add=loaded.radarr_add(name),
+    )
 
 
 @app.command()
@@ -219,8 +241,33 @@ def _load_config(explicit: Path | None, *, required: bool) -> Config | None:
         _usage_error(str(e))
 
 
-def _preview(query: Query, token: str, show_dropped: bool, config: Config | None) -> None:
-    """Run the query, print the kept (and optionally dropped) titles, then a summary."""
+def _preview(
+    query: Query,
+    token: str,
+    show_dropped: bool,
+    config: Config | None,
+    *,
+    apply: bool = False,
+    yes: bool = False,
+    radarr_add: RadarrAdd | None = None,
+) -> None:
+    """Run the query, print the kept (and optionally dropped) titles, then a summary.
+
+    With `apply`, then add the kept movies to Radarr (asking first, unless `yes`).
+    """
+    adds_movies = apply and "movie" in query.kinds
+    if apply and not yes and not _can_prompt():
+        _usage_error("--apply asks before adding, but nobody can answer here; add --yes")
+    if adds_movies:
+        if config is None or config.radarr is None or radarr_add is None:
+            _usage_error("--apply needs a usable radarr section in the config to add movies")
+        missing = [
+            key for key in ("quality_profile", "root_folder") if not getattr(radarr_add, key)
+        ]
+        if missing:
+            needed = " and ".join(f"radarr.{key}" for key in missing)
+            _usage_error(f"--apply needs {needed} in the config")
+
     # Titles can contain characters the terminal's encoding can't show (e.g. a Windows
     # console redirected to a file); replace them instead of crashing.
     reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -228,6 +275,8 @@ def _preview(query: Query, token: str, show_dropped: bool, config: Config | None
         reconfigure(errors="replace")
 
     summary = Summary(kinds=query.kinds)
+    kept: list[Candidate] = []
+    movie_options: RadarrAddOptions | None = None
     # Handlers are attached for this run only (not the global root logger), so they
     # always write to the current stderr and never pile up between runs.
     console = logging.StreamHandler(sys.stderr)
@@ -242,9 +291,16 @@ def _preview(query: Query, token: str, show_dropped: bool, config: Config | None
     try:
         # Fetched once, before searching, so a bad URL or API key fails fast.
         library = _load_library(query, config)
+        if adds_movies:
+            # Checked before searching too, so a wrong profile or folder fails fast.
+            assert config is not None and config.radarr is not None and radarr_add is not None
+            with RadarrClient(config.radarr.url, config.radarr.api_key) as radarr:
+                movie_options = radarr.prepare(radarr_add)
         with TmdbClient(token) as tmdb:
             for decision in run(query, tmdb, library):
                 summary.add(decision)
+                if decision.status == "kept":
+                    kept.append(decision.candidate)
                 if decision.status == "kept" or show_dropped:
                     print(_describe_candidate(decision.candidate) + _why_dropped(decision))
     except ArrError as e:
@@ -274,7 +330,60 @@ def _preview(query: Query, token: str, show_dropped: bool, config: Config | None
     parts.append(_plural(warnings.count, "warning", "warnings"))
     print("; ".join(parts))
     if status:
+        if apply:
+            print("Nothing was added, because the search didn't finish.", file=sys.stderr)
         raise typer.Exit(status)
+    if apply:
+        _apply(kept, config, movie_options, yes)
+
+
+def _apply(
+    kept: list[Candidate],
+    config: Config | None,
+    movie_options: RadarrAddOptions | None,
+    yes: bool,
+) -> None:
+    """Add the kept movies to Radarr, after asking unless `yes`. One line per movie."""
+    if series := [c for c in kept if c.kind == "series"]:
+        print(
+            f"WARNING: adding series isn't supported yet; "
+            f"{_plural(len(series), 'series', 'series')} not added",
+            file=sys.stderr,
+        )
+    movies = [c for c in kept if c.kind == "movie"]
+    if not movies:
+        print("No movies to add.")
+        return
+    assert config is not None and config.radarr is not None and movie_options is not None
+
+    question = f"Add {_plural(len(movies), 'movie', 'movies')} to Radarr?"
+    if not yes and not typer.confirm(question, err=True):
+        print("Nothing added.")
+        return
+
+    added = existing = failed = 0
+    with RadarrClient(config.radarr.url, config.radarr.api_key) as radarr:
+        for movie in movies:
+            described = _describe_candidate(movie)
+            try:
+                if radarr.add_movie(movie.tmdb_id, movie_options):
+                    added += 1
+                    print(f"added: {described}")
+                else:
+                    existing += 1
+                    print(f"already in Radarr: {described}")
+            except ArrError as e:
+                # One movie failing doesn't stop the rest.
+                failed += 1
+                print(f"failed: {described}: {e}")
+    print(f"Radarr: {added} added, {existing} already there, {failed} failed")
+    if failed:
+        raise typer.Exit(1)
+
+
+def _can_prompt() -> bool:
+    """Whether someone can answer a question (stdin is a terminal, not a script or pipe)."""
+    return sys.stdin.isatty()
 
 
 def _load_library(query: Query, config: Config | None) -> Library:

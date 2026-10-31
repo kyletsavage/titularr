@@ -5,13 +5,19 @@ sources:
   tmdb:
     token: ${TMDB_API_TOKEN}   # your TMDB "API Read Access Token"
 
-# Your Radarr / Sonarr, so previews can skip titles you already have ("in library").
-# Titularr only reads from them. API key: Settings > General > Security in each app.
+# Your Radarr / Sonarr, so previews can skip titles you already have ("in library"),
+# and --apply can add movies to Radarr. API key: Settings > General > Security in each app.
 # Uncomment the apps you use. A section that's present but can't be used (e.g. its
 # API key variable isn't set) gives a warning, and that library check is skipped.
 # radarr:
 #   url: http://radarr:7878
 #   api_key: ${RADARR_API_KEY}
+#   # How --apply adds movies. The first two are needed only to add:
+#   quality_profile: HD-1080p          # a profile name, as Radarr shows it
+#   root_folder: /movies               # one of Radarr's root folders
+#   # monitored: true                  # default: true
+#   # minimum_availability: released   # announced, inCinemas or released (default)
+#   # search_on_add: false             # default: false; review what was added first
 # sonarr:
 #   url: http://sonarr:8989
 #   api_key: ${SONARR_API_KEY}
@@ -43,3 +49,5 @@ queries:
       languages: any
     exclusions:                # this query's own, checked after the global list
       titles: [dead and loving]  # ...except the 1995 parody "Dracula: Dead and Loving It"
+    # radarr:                  # this query's own add settings, replacing the radarr section's
+    #   root_folder: /horror

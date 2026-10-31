@@ -20,6 +20,7 @@ from pydantic import (
     field_validator,
 )
 
+from titularr.arr import RadarrAdd
 from titularr.exclusions import Exclusions
 from titularr.pipeline import Query
 
@@ -48,7 +49,7 @@ class Sources(_Strict):
 
 
 class ArrSettings(_Strict):
-    """How to reach Radarr or Sonarr. Titularr only reads from them for now."""
+    """How to reach Radarr or Sonarr."""
 
     url: str
     api_key: str = Field(min_length=1)
@@ -61,17 +62,29 @@ class ArrSettings(_Strict):
         return value.rstrip("/")
 
 
+class RadarrSettings(ArrSettings, RadarrAdd):
+    """How to reach Radarr, and how movies are added to it by default."""
+
+
+class SavedQuery(Query):
+    """A query saved in the config. Its `radarr:` settings override the radarr section's."""
+
+    radarr: RadarrAdd | None = None
+
+
 # Which kind of title each app's library covers.
 _ARR_KINDS = {"radarr": "movies", "sonarr": "series"}
+# The keys each app's section may have.
+_ARR_KEYS = {"radarr": set(RadarrSettings.model_fields), "sonarr": set(ArrSettings.model_fields)}
 
 
 class Config(_Strict):
     sources: Sources
-    radarr: ArrSettings | None = None
+    radarr: RadarrSettings | None = None
     sonarr: ArrSettings | None = None
     # Applies to every query, as a separate "global" layer next to the query's own.
     exclusions: Exclusions = Exclusions()
-    queries: dict[str, Query] = {}
+    queries: dict[str, SavedQuery] = {}
 
     # Problems that don't stop the config from loading (e.g. a radarr section that
     # can't be used). Set by load_config, not from the file.
@@ -83,7 +96,7 @@ class Config(_Strict):
 
     @field_validator("queries")
     @classmethod
-    def _check_queries(cls, value: dict[str, Query]) -> dict[str, Query]:
+    def _check_queries(cls, value: dict[str, SavedQuery]) -> dict[str, SavedQuery]:
         for name, query in value.items():
             if not _QUERY_NAME.fullmatch(name):
                 raise ValueError(f"query name {name!r} may only use letters, digits, '-' and '_'")
@@ -102,6 +115,18 @@ class Config(_Strict):
             available = ", ".join(sorted(self.queries)) or "none saved"
             raise ConfigError(f"no saved query named {name!r} (available: {available})") from None
         return saved.model_copy(update={"global_exclusions": self.exclusions})
+
+    def radarr_add(self, query_name: str | None = None) -> RadarrAdd | None:
+        """How to add movies: the radarr section's settings, with the saved query's
+        overrides on top. None if there's no usable radarr section."""
+        if self.radarr is None:
+            return None
+        add = RadarrAdd.model_validate(self.radarr.model_dump(include=set(RadarrAdd.model_fields)))
+        override = self.queries[query_name].radarr if query_name is not None else None
+        if override is not None:
+            # Only the settings the query actually sets replace the radarr section's.
+            add = add.model_copy(update=override.model_dump(exclude_unset=True))
+        return add
 
 
 def resolve_config_path(explicit: Path | None = None) -> Path:
@@ -133,7 +158,7 @@ def load_config(path: Path) -> Config:
     # unset variables) become warnings, so the rest of Titularr still works.
     warnings: list[str] = []
     for app, kinds in _ARR_KINDS.items():
-        if app in data and (problem := _unusable(data[app])):
+        if app in data and (problem := _unusable(data[app], _ARR_KEYS[app])):
             warnings.append(
                 f"{app} is in the config but can't be used ({problem}); "
                 f"{kinds} won't be checked against your library"
@@ -151,12 +176,12 @@ def load_config(path: Path) -> Config:
     return config
 
 
-def _unusable(section: Any) -> str | None:
+def _unusable(section: Any, keys: set[str]) -> str | None:
     """Why a radarr/sonarr section can't be used, or None if it can (or is malformed:
     unknown keys and bad values are left for validation to report as errors)."""
     if section is None:
         return "it has no settings"
-    if not isinstance(section, dict) or set(section) - {"url", "api_key"}:
+    if not isinstance(section, dict) or set(section) - keys:
         return None
     problems = []
     for key in ("url", "api_key"):

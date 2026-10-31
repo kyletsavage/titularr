@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from titularr.arr import RadarrAdd
 from titularr.config import ConfigError, load_config, resolve_config_path
 
 EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
@@ -266,3 +267,70 @@ def test_malformed_arr_section_is_still_an_error(write, section, message):
 def test_warnings_cant_be_set_from_the_file(write):
     with pytest.raises(ConfigError, match="warnings: Extra inputs are not permitted"):
         load_config(write(MINIMAL + "warnings: [hi]\n"))
+
+
+# --- adding to Radarr ---
+
+RADARR = "radarr:\n  url: http://radarr:7878\n  api_key: k\n"
+
+
+def test_radarr_add_settings_default_to_safe_values(write):
+    config = load_config(write(MINIMAL + RADARR))
+    assert config.radarr_add() == RadarrAdd(
+        quality_profile=None,
+        root_folder=None,
+        monitored=True,
+        minimum_availability="released",
+        search_on_add=False,
+    )
+
+
+def test_no_radarr_section_means_no_add_settings(write):
+    assert load_config(write(MINIMAL)).radarr_add() is None
+
+
+def test_saved_query_overrides_only_what_it_sets(write):
+    text = (
+        MINIMAL
+        + RADARR
+        + "  quality_profile: HD-1080p\n  root_folder: /movies\n  search_on_add: true\n"
+        + "queries:\n"
+        + "  kids:\n    text: christmas\n    radarr:\n      root_folder: /kids\n"
+        + "  plain:\n    text: christmas\n"
+    )
+    config = load_config(write(text))
+
+    kids = config.radarr_add("kids")
+    assert (kids.quality_profile, kids.root_folder, kids.search_on_add) == (
+        "HD-1080p",
+        "/kids",
+        True,
+    )
+    assert config.radarr_add("plain") == config.radarr_add()
+    assert config.query("kids").text == "christmas"
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "message"),
+    [
+        (RADARR + "  quality_profiles: Any\n", "radarr.quality_profiles: Extra inputs"),
+        (RADARR + "  minimum_availability: soon\n", "radarr.minimum_availability"),
+        (
+            "queries:\n  q:\n    text: a\n    radarr:\n      url: http://other\n",
+            "queries.q.radarr.url: Extra inputs",
+        ),
+    ],
+)
+def test_invalid_add_settings_name_the_field(write, yaml_text, message):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write(MINIMAL + yaml_text))
+    assert message in str(excinfo.value)
+
+
+def test_unusable_radarr_section_with_add_settings_is_still_a_warning(write, monkeypatch):
+    monkeypatch.delenv("UNSET_RADARR_KEY", raising=False)
+    section = "radarr:\n  url: http://r\n  api_key: ${UNSET_RADARR_KEY}\n  root_folder: /movies\n"
+    config = load_config(write(MINIMAL + section))
+
+    assert config.radarr is None
+    assert "UNSET_RADARR_KEY is not set" in config.warnings[0]
