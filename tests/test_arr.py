@@ -105,6 +105,7 @@ def test_non_json_response_is_an_arr_error():
 
 PROFILES = [{"id": 1, "name": "Any"}, {"id": 4, "name": "HD-1080p"}]
 FOLDERS = [{"path": "/movies"}, {"path": "/kids/"}]
+TAGS = [{"id": 3, "label": "anime"}, {"id": 5, "label": "german"}]
 
 
 def fake_radarr(post=lambda r: httpx2.Response(201, json={})):
@@ -115,6 +116,8 @@ def fake_radarr(post=lambda r: httpx2.Response(201, json={})):
         path = request.url.path
         if path == "/api/v3/qualityprofile":
             return httpx2.Response(200, json=PROFILES)
+        if path == "/api/v3/tag":
+            return httpx2.Response(200, json=TAGS)
         if path == "/api/v3/rootfolder":
             return httpx2.Response(200, json=FOLDERS)
         if path == "/api/v3/movie/lookup/tmdb":
@@ -180,6 +183,7 @@ def test_add_movie_sends_the_lookup_back_with_the_settings():
         "rootFolderPath": "/movies",
         "monitored": False,
         "minimumAvailability": "announced",
+        "tags": [],
         "addOptions": {"searchForMovie": False, "monitor": "none"},
     }
 
@@ -231,6 +235,8 @@ def fake_sonarr(lookup=(WARS,), post=lambda r: httpx2.Response(201, json={})):
         path = request.url.path
         if path == "/api/v3/qualityprofile":
             return httpx2.Response(200, json=PROFILES)
+        if path == "/api/v3/tag":
+            return httpx2.Response(200, json=TAGS)
         if path == "/api/v3/rootfolder":
             return httpx2.Response(200, json=FOLDERS)
         if path == "/api/v3/series/lookup":
@@ -290,6 +296,7 @@ def test_add_series_looks_up_by_tmdb_id_and_sends_it_back():
         "seasonFolder": False,
         "seriesType": "anime",
         "monitorNewItems": "none",
+        "tags": [],
         "addOptions": {
             "monitor": "future",
             "searchForMissingEpisodes": True,
@@ -338,3 +345,49 @@ def test_radarrs_exists_code_isnt_sonarrs():
     client, _ = sonarr_client(fake_sonarr(post=lambda r: httpx2.Response(400, json=exists)))
     with pytest.raises(ArrError, match="Sonarr returned HTTP 400: already added"):
         client.add_series(10, SONARR_OPTIONS)
+
+
+# --- tags ---
+
+
+def test_tag_names_are_lowercased_and_repeats_dropped():
+    assert RadarrAdd(tags=["German", " anime", "german"]).tags == ("german", "anime")
+    assert SonarrAdd(tags=["Anime", "anime"]).tags == ("anime",)
+
+
+def test_prepare_turns_tag_names_into_ids_in_order():
+    client, _ = client_for(RadarrClient, fake_radarr())
+    add = RadarrAdd(quality_profile="Any", root_folder="/movies", tags=["german", "anime"])
+    assert client.prepare(add).tag_ids == (5, 3)
+
+    client, _ = sonarr_client(fake_sonarr())
+    add = SonarrAdd(quality_profile="Any", root_folder="/kids", tags=["anime"])
+    assert client.prepare(add).tag_ids == (3,)
+
+
+def test_missing_tag_lists_the_apps_tags_and_isnt_created():
+    client, requests = sonarr_client(fake_sonarr())
+    add = SonarrAdd(quality_profile="Any", root_folder="/kids", tags=["anime", "dubbed"])
+
+    with pytest.raises(ArrError) as excinfo:
+        client.prepare(add)
+    assert str(excinfo.value).startswith(
+        "Sonarr has no tag named 'dubbed' (it has: anime, german); tags aren't created"
+    )
+    assert all(r.method == "GET" for r in requests)
+
+
+def test_no_tags_means_no_tag_request():
+    client, requests = client_for(RadarrClient, fake_radarr())
+    assert client.prepare(RadarrAdd(quality_profile="Any", root_folder="/movies")).tag_ids == ()
+    assert "/api/v3/tag" not in [r.url.path for r in requests]
+
+
+def test_added_titles_carry_the_tag_ids():
+    client, requests = client_for(RadarrClient, fake_radarr())
+    client.add_movie(1, replace(OPTIONS, tag_ids=(5, 3)))
+    assert json.loads(requests[-1].content)["tags"] == [5, 3]
+
+    client, requests = sonarr_client(fake_sonarr())
+    client.add_series(10, replace(SONARR_OPTIONS, tag_ids=(3,)))
+    assert json.loads(requests[-1].content)["tags"] == [3]

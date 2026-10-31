@@ -41,12 +41,12 @@ radarr:                # optional: skip movies you already have, and add with --
   url: http://radarr:7878
   api_key: ${RADARR_API_KEY}
   quality_profile: HD-1080p   # needed for --apply; also: monitored, minimum_availability,
-  root_folder: /movies        # search_on_add (default: off)
+  root_folder: /movies        # search_on_add (default: off), tags
 sonarr:                # optional: skip series you already have, and add with --apply
   url: http://sonarr:8989
   api_key: ${SONARR_API_KEY}
   quality_profile: HD-1080p   # needed for --apply; also: monitor, season_folder, series_type,
-  root_folder: /tv            # monitor_new_items, search_on_add (default: off)
+  root_folder: /tv            # monitor_new_items, search_on_add (default: off), tags
 
 exclusions:            # never keep these, in any query ("global" exclusions)
   ids: [movie:1399]
@@ -97,6 +97,8 @@ uv run titularr run holiday-movies --apply
 
 Sonarr adds series by their TVDB ID, so each series is looked up in Sonarr by its TMDB ID first. A series Sonarr can't find (usually one with no TVDB entry) is listed as `not found in Sonarr` and counted separately. It isn't an error, since running again won't change it.
 
+**Tags** (`tags: [anime]` in the `radarr:` or `sonarr:` section, or in a query's own block) are added to every title. In Radarr and Sonarr, a title's tags decide which release profiles (required and ignored words), indexers, download clients and delay profiles apply to it, so they change what gets grabbed. That's why each tag must already exist in the app. A missing one stops the run before searching and lists the app's tags, and Titularr never creates tags. The question before adding names the tags, and a query's tags replace the section's (`tags: []` means none for that query).
+
 ## A word of caution
 
 Broad keywords can match a *lot* of titles. Review the preview first, use filters and exclusions to keep results relevant, and leave `search_on_add` off (the default) until you've reviewed what landed in Radarr and Sonarr. Your indexers and your disks will thank you.
@@ -115,7 +117,7 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [ ] Run history (SQLite)
 - [x] Adding movies to Radarr with `--apply`
 - [x] Adding series to Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs)
-- [ ] Tags on added titles
+- [x] Tags on added titles (existing tags only)
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
 - [ ] Saved queries and scheduling
 - [ ] Docker service with an HTTP API

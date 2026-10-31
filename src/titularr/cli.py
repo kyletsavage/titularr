@@ -397,6 +397,8 @@ def _apply(kept: list[Candidate], targets: list[_Target], yes: bool) -> None:
 
     question = " and ".join(
         f"{_plural(len(titles), *_KIND_WORDS[target.kind])} to {target.app}"
+        # Tags change which release profiles apply, so they're named before adding.
+        + (f" (tags: {', '.join(target.add.tags)})" if target.add.tags else "")
         for target, titles in batches
     )
     if not yes and not typer.confirm(f"Add {question}?", err=True):
