@@ -6,7 +6,7 @@ sources:
     token: ${TMDB_API_TOKEN}   # your TMDB "API Read Access Token"
 
 # Your Radarr / Sonarr, so previews can skip titles you already have ("in library"),
-# and --apply can add movies to Radarr. API key: Settings > General > Security in each app.
+# and --apply can add movies and series. API key: Settings > General > Security in each app.
 # Uncomment the apps you use. A section that's present but can't be used (e.g. its
 # API key variable isn't set) gives a warning, and that library check is skipped.
 # radarr:
@@ -21,6 +21,16 @@ sources:
 # sonarr:
 #   url: http://sonarr:8989
 #   api_key: ${SONARR_API_KEY}
+#   # How --apply adds series. The first two are needed only to add:
+#   quality_profile: HD-1080p          # a profile name, as Sonarr shows it
+#   root_folder: /tv                   # one of Sonarr's root folders
+#   # monitor: all                     # which episodes: all (default), future, missing,
+#   #                                  # existing, firstSeason, lastSeason, pilot, recent,
+#   #                                  # monitorSpecials, unmonitorSpecials or none
+#   # season_folder: true              # default: true
+#   # series_type: standard            # standard (default), daily or anime
+#   # monitor_new_items: all           # new seasons: all (default) or none
+#   # search_on_add: false             # default: false; review what was added first
 
 # Never keep these titles, in any query. Checked alongside each query's own exclusions;
 # excluded titles say which list excluded them ("global:" or "query:").
@@ -51,3 +61,12 @@ queries:
       titles: [dead and loving]  # ...except the 1995 parody "Dracula: Dead and Loving It"
     # radarr:                  # this query's own add settings, replacing the radarr section's
     #   root_folder: /horror
+
+  # gundam:
+  #   text: gundam
+  #   kinds: [series]
+  #   filters:
+  #     languages: [ja]
+  #   sonarr:                  # this query's own add settings, replacing the sonarr section's
+  #     series_type: anime
+  #     root_folder: /anime

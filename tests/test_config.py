@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from titularr.arr import RadarrAdd
+from titularr.arr import RadarrAdd, SonarrAdd
 from titularr.config import ConfigError, load_config, resolve_config_path
 
 EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
@@ -334,3 +334,73 @@ def test_unusable_radarr_section_with_add_settings_is_still_a_warning(write, mon
 
     assert config.radarr is None
     assert "UNSET_RADARR_KEY is not set" in config.warnings[0]
+
+
+# --- adding to Sonarr ---
+
+SONARR = "sonarr:\n  url: http://sonarr:8989\n  api_key: k\n"
+
+
+def test_sonarr_add_settings_default_to_sonarrs_own(write):
+    config = load_config(write(MINIMAL + SONARR))
+    assert config.sonarr_add() == SonarrAdd(
+        quality_profile=None,
+        root_folder=None,
+        monitor="all",
+        season_folder=True,
+        series_type="standard",
+        monitor_new_items="all",
+        search_on_add=False,
+    )
+
+
+def test_no_sonarr_section_means_no_add_settings(write):
+    assert load_config(write(MINIMAL + RADARR)).sonarr_add() is None
+
+
+def test_saved_query_overrides_sonarr_settings_too(write):
+    text = (
+        MINIMAL
+        + SONARR
+        + "  quality_profile: HD-1080p\n  root_folder: /tv\n"
+        + "queries:\n"
+        + "  anime:\n    text: gundam\n    sonarr:\n      series_type: anime\n"
+        + "      root_folder: /anime\n"
+    )
+    config = load_config(write(text))
+
+    anime = config.sonarr_add("anime")
+    assert (anime.quality_profile, anime.root_folder, anime.series_type, anime.monitor) == (
+        "HD-1080p",
+        "/anime",
+        "anime",
+        "all",
+    )
+    assert config.radarr_add("anime") is None  # no radarr section
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "message"),
+    [
+        (SONARR + "  monitor: everything\n", "sonarr.monitor"),
+        (SONARR + "  series_type: cartoon\n", "sonarr.series_type"),
+        (SONARR + "  minimum_availability: released\n", "sonarr.minimum_availability: Extra"),
+        (
+            "queries:\n  q:\n    text: a\n    sonarr:\n      monitored: true\n",
+            "queries.q.sonarr.monitored: Extra inputs",
+        ),
+    ],
+)
+def test_invalid_sonarr_settings_name_the_field(write, yaml_text, message):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write(MINIMAL + yaml_text))
+    assert message in str(excinfo.value)
+
+
+def test_unusable_sonarr_section_with_add_settings_is_still_a_warning(write, monkeypatch):
+    monkeypatch.delenv("UNSET_SONARR_KEY", raising=False)
+    section = "sonarr:\n  url: http://s\n  api_key: ${UNSET_SONARR_KEY}\n  monitor: future\n"
+    config = load_config(write(MINIMAL + section))
+
+    assert config.sonarr is None
+    assert "UNSET_SONARR_KEY is not set" in config.warnings[0]

@@ -1,8 +1,9 @@
-"""Clients for Radarr and Sonarr: which titles are already in your library, and (for
-Radarr so far) adding movies to it.
+"""Clients for Radarr and Sonarr: which titles are already in your library, and adding
+movies and series to it.
 
 Both apps serve the same v3 API, authenticated with an X-Api-Key header. Only
-`RadarrClient.add_movie` changes anything; everything else reads.
+`RadarrClient.add_movie` and `SonarrClient.add_series` change anything; everything
+else reads.
 """
 
 from collections.abc import Callable
@@ -18,6 +19,26 @@ TIMEOUT_SECONDS = 30.0
 
 MinimumAvailability = Literal["announced", "inCinemas", "released"]
 """When Radarr considers a movie available to download (Radarr's own names)."""
+
+SonarrMonitor = Literal[
+    "all",
+    "future",
+    "missing",
+    "existing",
+    "firstSeason",
+    "lastSeason",
+    "pilot",
+    "recent",
+    "monitorSpecials",
+    "unmonitorSpecials",
+    "none",
+]
+"""Which episodes Sonarr monitors when a series is added (Sonarr's own names)."""
+
+SeriesType = Literal["standard", "daily", "anime"]
+
+AddResult = Literal["added", "exists", "not_found"]
+"""What happened to one title: added, already in the app, or not found by the app."""
 
 
 class ArrError(Exception):
@@ -59,6 +80,39 @@ class RadarrAddOptions:
     search_on_add: bool
 
 
+class SonarrAdd(BaseModel):
+    """How series are added to Sonarr, as written in the config.
+
+    Like `RadarrAdd`, the quality profile is a name and the root folder a path, and both
+    are only needed to add. The other defaults match Sonarr's own "Add Series" screen,
+    except that searching on add is off.
+    """
+
+    # extra="forbid": a typo like "series_types" in a config file is an error, not ignored.
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    quality_profile: str | None = None
+    root_folder: str | None = None
+    monitor: SonarrMonitor = "all"
+    season_folder: bool = True
+    series_type: SeriesType = "standard"
+    monitor_new_items: Literal["all", "none"] = "all"
+    search_on_add: bool = False
+
+
+@dataclass(frozen=True)
+class SonarrAddOptions:
+    """`SonarrAdd` checked against Sonarr, with the quality profile as its ID."""
+
+    quality_profile_id: int
+    root_folder: str
+    monitor: SonarrMonitor
+    season_folder: bool
+    series_type: SeriesType
+    monitor_new_items: Literal["all", "none"]
+    search_on_add: bool
+
+
 @dataclass(frozen=True)
 class SonarrLibrary:
     tmdb_ids: frozenset[int]
@@ -68,6 +122,8 @@ class SonarrLibrary:
 
 class _ArrClient:
     app = "the app"
+    # The validation error code the app sends when a title is already in it.
+    exists_code = ""
 
     def __init__(
         self, url: str, api_key: str, *, transport: httpx2.BaseTransport | None = None
@@ -112,39 +168,56 @@ class _ArrClient:
         except ValueError as e:
             raise ArrError(f"{self.app} returned a response that isn't JSON") from e
 
+    def _profile_and_folder(self, profile: str | None, folder: str | None) -> tuple[int, str]:
+        """The ID of the quality profile named `profile`, and the app's own spelling of
+        root folder `folder`.
+
+        Raises ArrError naming the choices the app has when one doesn't exist. Both must
+        be set (callers report a missing one as a config problem first).
+        """
+        if profile is None or folder is None:
+            raise ValueError(f"quality_profile and root_folder are needed to add to {self.app}")
+
+        profiles = {p["name"]: p["id"] for p in self._get("api/v3/qualityprofile")}
+        profile_id = _find(profiles, profile, str.casefold)
+        if profile_id is None:
+            raise ArrError(
+                f"{self.app} has no quality profile named {profile!r} "
+                f"(it has: {', '.join(sorted(profiles)) or 'none'})"
+            )
+
+        folders = {f["path"]: f["path"] for f in self._get("api/v3/rootfolder")}
+        root_folder = _find(folders, folder, _folder_key)
+        if root_folder is None:
+            raise ArrError(
+                f"{self.app} has no root folder {folder!r} "
+                f"(it has: {', '.join(sorted(folders)) or 'none'})"
+            )
+        return profile_id, root_folder
+
+    def _add(self, path: str, body: dict[str, Any]) -> AddResult:
+        """POST a title to add; "exists" if the app already has it."""
+        try:
+            self._post(path, body)
+        except ArrError as e:
+            # Added since the library was read, e.g. by hand while the preview ran.
+            if self.exists_code in e.codes:
+                return "exists"
+            raise
+        return "added"
+
 
 class RadarrClient(_ArrClient):
     app = "Radarr"
+    exists_code = "MovieExistsValidator"
 
     def library_tmdb_ids(self) -> set[int]:
         """The TMDB IDs of every movie in Radarr."""
         return {movie["tmdbId"] for movie in self._get("api/v3/movie") if movie.get("tmdbId")}
 
     def prepare(self, add: RadarrAdd) -> RadarrAddOptions:
-        """Check the add settings against Radarr: the profile and root folder must exist.
-
-        Raises ArrError naming the choices Radarr has when one doesn't. Both must be set
-        (callers report a missing one as a config problem first).
-        """
-        if add.quality_profile is None or add.root_folder is None:
-            raise ValueError("quality_profile and root_folder are needed to add movies")
-
-        profiles = {p["name"]: p["id"] for p in self._get("api/v3/qualityprofile")}
-        profile_id = _find(profiles, add.quality_profile, str.casefold)
-        if profile_id is None:
-            raise ArrError(
-                f"Radarr has no quality profile named {add.quality_profile!r} "
-                f"(it has: {', '.join(sorted(profiles)) or 'none'})"
-            )
-
-        folders = {f["path"]: f["path"] for f in self._get("api/v3/rootfolder")}
-        root_folder = _find(folders, add.root_folder, _folder_key)
-        if root_folder is None:
-            raise ArrError(
-                f"Radarr has no root folder {add.root_folder!r} "
-                f"(it has: {', '.join(sorted(folders)) or 'none'})"
-            )
-
+        """Check the add settings against Radarr: the profile and root folder must exist."""
+        profile_id, root_folder = self._profile_and_folder(add.quality_profile, add.root_folder)
         return RadarrAddOptions(
             quality_profile_id=profile_id,
             root_folder=root_folder,
@@ -153,8 +226,8 @@ class RadarrClient(_ArrClient):
             search_on_add=add.search_on_add,
         )
 
-    def add_movie(self, tmdb_id: int, options: RadarrAddOptions) -> bool:
-        """Add the movie with this TMDB ID. False if Radarr already has it.
+    def add_movie(self, tmdb_id: int, options: RadarrAddOptions) -> AddResult:
+        """Add the movie with this TMDB ID: "added", or "exists" if Radarr has it.
 
         The movie is looked up in Radarr first, and that same data is sent back with
         the add settings filled in, as Radarr's own web UI does.
@@ -170,18 +243,52 @@ class RadarrClient(_ArrClient):
                 "monitor": "movieOnly" if options.monitored else "none",
             },
         )
-        try:
-            self._post("api/v3/movie", movie)
-        except ArrError as e:
-            # Added since the library was read, e.g. by hand while the preview ran.
-            if "MovieExistsValidator" in e.codes:
-                return False
-            raise
-        return True
+        return self._add("api/v3/movie", movie)
 
 
 class SonarrClient(_ArrClient):
     app = "Sonarr"
+    exists_code = "SeriesExistsValidator"
+
+    def prepare(self, add: SonarrAdd) -> SonarrAddOptions:
+        """Check the add settings against Sonarr: the profile and root folder must exist."""
+        profile_id, root_folder = self._profile_and_folder(add.quality_profile, add.root_folder)
+        return SonarrAddOptions(
+            quality_profile_id=profile_id,
+            root_folder=root_folder,
+            monitor=add.monitor,
+            season_folder=add.season_folder,
+            series_type=add.series_type,
+            monitor_new_items=add.monitor_new_items,
+            search_on_add=add.search_on_add,
+        )
+
+    def add_series(self, tmdb_id: int, options: SonarrAddOptions) -> AddResult:
+        """Add the series with this TMDB ID: "added", "exists" if Sonarr has it, or
+        "not_found" if Sonarr can't find it.
+
+        Sonarr adds series by TVDB ID, so the series is looked up by its TMDB ID first
+        (Sonarr's own "tmdb:" search term). Only a result with that exact TMDB ID and a
+        TVDB ID counts; that data is sent back with the add settings filled in.
+        """
+        results = self._get("api/v3/series/lookup", {"term": f"tmdb:{tmdb_id}"})
+        series = next((s for s in results if s.get("tmdbId") == tmdb_id and s.get("tvdbId")), None)
+        if series is None:
+            return "not_found"
+        series.update(
+            qualityProfileId=options.quality_profile_id,
+            rootFolderPath=options.root_folder,
+            monitored=options.monitor != "none",
+            seasonFolder=options.season_folder,
+            seriesType=options.series_type,
+            monitorNewItems=options.monitor_new_items,
+            addOptions={
+                "monitor": options.monitor,
+                "searchForMissingEpisodes": options.search_on_add,
+                "searchForCutoffUnmetEpisodes": False,
+            },
+        )
+        return self._add("api/v3/series", series)
 
     def library(self) -> SonarrLibrary:
         """The TMDB IDs of every series in Sonarr, plus the series that have none."""

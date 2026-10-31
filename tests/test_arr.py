@@ -4,7 +4,15 @@ from dataclasses import replace
 import httpx2
 import pytest
 
-from titularr.arr import ArrError, RadarrAdd, RadarrAddOptions, RadarrClient, SonarrClient
+from titularr.arr import (
+    ArrError,
+    RadarrAdd,
+    RadarrAddOptions,
+    RadarrClient,
+    SonarrAdd,
+    SonarrAddOptions,
+    SonarrClient,
+)
 
 API_KEY = "secret-api-key"
 
@@ -160,7 +168,7 @@ OPTIONS = RadarrAddOptions(
 def test_add_movie_sends_the_lookup_back_with_the_settings():
     client, requests = client_for(RadarrClient, fake_radarr())
 
-    assert client.add_movie(10719, OPTIONS) is True
+    assert client.add_movie(10719, OPTIONS) == "added"
     lookup, post = requests
     assert str(lookup.url) == "http://radarr:7878/api/v3/movie/lookup/tmdb?tmdbId=10719"
     assert post.method == "POST"
@@ -185,7 +193,7 @@ def test_monitored_movie_is_added_as_movie_only():
     assert body["addOptions"] == {"searchForMovie": True, "monitor": "movieOnly"}
 
 
-def test_add_movie_already_in_radarr_returns_false():
+def test_add_movie_already_in_radarr_is_exists():
     exists = [
         {
             "propertyName": "TmdbId",
@@ -194,7 +202,7 @@ def test_add_movie_already_in_radarr_returns_false():
         }
     ]
     client, _ = client_for(RadarrClient, fake_radarr(lambda r: httpx2.Response(400, json=exists)))
-    assert client.add_movie(10719, OPTIONS) is False
+    assert client.add_movie(10719, OPTIONS) == "exists"
 
 
 def test_other_validation_errors_are_reported():
@@ -208,3 +216,125 @@ def test_other_validation_errors_are_reported():
         client.add_movie(10719, OPTIONS)
     assert str(excinfo.value) == "Radarr returned HTTP 400: Path is not writable; Invalid Path"
     assert excinfo.value.codes == ("FolderWritableValidator",)
+
+
+# --- adding series to Sonarr ---
+
+WARS = {"title": "Christmas Wars", "tmdbId": 10, "tvdbId": 400}
+
+
+def fake_sonarr(lookup=(WARS,), post=lambda r: httpx2.Response(201, json={})):
+    """A Sonarr handler with the same profiles and folders as fake_radarr. `lookup` is
+    what a series lookup returns; `post` answers the add request."""
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/v3/qualityprofile":
+            return httpx2.Response(200, json=PROFILES)
+        if path == "/api/v3/rootfolder":
+            return httpx2.Response(200, json=FOLDERS)
+        if path == "/api/v3/series/lookup":
+            return httpx2.Response(200, json=list(lookup))
+        if path == "/api/v3/series" and request.method == "POST":
+            return post(request)
+        return httpx2.Response(404)
+
+    return handler
+
+
+def sonarr_client(handler):
+    return client_for(SonarrClient, handler, url="http://sonarr:8989")
+
+
+SONARR_OPTIONS = SonarrAddOptions(
+    quality_profile_id=4,
+    root_folder="/kids/",
+    monitor="future",
+    season_folder=False,
+    series_type="anime",
+    monitor_new_items="none",
+    search_on_add=True,
+)
+
+
+def test_sonarr_prepare_uses_the_shared_checks():
+    client, _ = sonarr_client(fake_sonarr())
+    add = SonarrAdd(quality_profile="HD-1080p", root_folder="/kids")
+
+    assert client.prepare(add) == SonarrAddOptions(
+        quality_profile_id=4,
+        root_folder="/kids/",
+        monitor="all",
+        season_folder=True,
+        series_type="standard",
+        monitor_new_items="all",
+        search_on_add=False,
+    )
+    with pytest.raises(ArrError, match=r"Sonarr has no quality profile named '4K'"):
+        client.prepare(add.model_copy(update={"quality_profile": "4K"}))
+
+
+def test_add_series_looks_up_by_tmdb_id_and_sends_it_back():
+    client, requests = sonarr_client(fake_sonarr())
+
+    assert client.add_series(10, SONARR_OPTIONS) == "added"
+    lookup, post = requests
+    assert str(lookup.url) == "http://sonarr:8989/api/v3/series/lookup?term=tmdb%3A10"
+    assert json.loads(post.content) == {
+        "title": "Christmas Wars",
+        "tmdbId": 10,
+        "tvdbId": 400,
+        "qualityProfileId": 4,
+        "rootFolderPath": "/kids/",
+        "monitored": True,
+        "seasonFolder": False,
+        "seriesType": "anime",
+        "monitorNewItems": "none",
+        "addOptions": {
+            "monitor": "future",
+            "searchForMissingEpisodes": True,
+            "searchForCutoffUnmetEpisodes": False,
+        },
+    }
+
+
+def test_add_series_monitoring_none_adds_it_unmonitored():
+    client, requests = sonarr_client(fake_sonarr())
+    client.add_series(10, replace(SONARR_OPTIONS, monitor="none"))
+    assert json.loads(requests[-1].content)["monitored"] is False
+
+
+def test_add_series_only_uses_the_result_with_that_tmdb_id():
+    other = {"title": "Christmas Wars (Remake)", "tmdbId": 99, "tvdbId": 401}
+    client, requests = sonarr_client(fake_sonarr(lookup=[other, WARS]))
+
+    assert client.add_series(10, SONARR_OPTIONS) == "added"
+    assert json.loads(requests[-1].content)["tvdbId"] == 400
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        [],
+        [{"title": "Someone Else", "tmdbId": 99, "tvdbId": 401}],
+        [{"title": "Christmas Wars", "tmdbId": 10, "tvdbId": 0}],  # no TVDB entry
+    ],
+)
+def test_add_series_not_found_sends_nothing(lookup):
+    client, requests = sonarr_client(fake_sonarr(lookup=lookup))
+
+    assert client.add_series(10, SONARR_OPTIONS) == "not_found"
+    assert [r.method for r in requests] == ["GET"]
+
+
+def test_add_series_already_in_sonarr_is_exists():
+    exists = [{"errorMessage": "already added", "errorCode": "SeriesExistsValidator"}]
+    client, _ = sonarr_client(fake_sonarr(post=lambda r: httpx2.Response(400, json=exists)))
+    assert client.add_series(10, SONARR_OPTIONS) == "exists"
+
+
+def test_radarrs_exists_code_isnt_sonarrs():
+    exists = [{"errorMessage": "already added", "errorCode": "MovieExistsValidator"}]
+    client, _ = sonarr_client(fake_sonarr(post=lambda r: httpx2.Response(400, json=exists)))
+    with pytest.raises(ArrError, match="Sonarr returned HTTP 400: already added"):
+        client.add_series(10, SONARR_OPTIONS)

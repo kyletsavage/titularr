@@ -20,7 +20,7 @@ from pydantic import (
     field_validator,
 )
 
-from titularr.arr import RadarrAdd
+from titularr.arr import RadarrAdd, SonarrAdd
 from titularr.exclusions import Exclusions
 from titularr.pipeline import Query
 
@@ -66,22 +66,28 @@ class RadarrSettings(ArrSettings, RadarrAdd):
     """How to reach Radarr, and how movies are added to it by default."""
 
 
+class SonarrSettings(ArrSettings, SonarrAdd):
+    """How to reach Sonarr, and how series are added to it by default."""
+
+
 class SavedQuery(Query):
-    """A query saved in the config. Its `radarr:` settings override the radarr section's."""
+    """A query saved in the config. Its `radarr:` and `sonarr:` settings override the
+    radarr and sonarr sections'."""
 
     radarr: RadarrAdd | None = None
+    sonarr: SonarrAdd | None = None
 
 
 # Which kind of title each app's library covers.
 _ARR_KINDS = {"radarr": "movies", "sonarr": "series"}
 # The keys each app's section may have.
-_ARR_KEYS = {"radarr": set(RadarrSettings.model_fields), "sonarr": set(ArrSettings.model_fields)}
+_ARR_KEYS = {"radarr": set(RadarrSettings.model_fields), "sonarr": set(SonarrSettings.model_fields)}
 
 
 class Config(_Strict):
     sources: Sources
     radarr: RadarrSettings | None = None
-    sonarr: ArrSettings | None = None
+    sonarr: SonarrSettings | None = None
     # Applies to every query, as a separate "global" layer next to the query's own.
     exclusions: Exclusions = Exclusions()
     queries: dict[str, SavedQuery] = {}
@@ -119,14 +125,27 @@ class Config(_Strict):
     def radarr_add(self, query_name: str | None = None) -> RadarrAdd | None:
         """How to add movies: the radarr section's settings, with the saved query's
         overrides on top. None if there's no usable radarr section."""
-        if self.radarr is None:
-            return None
-        add = RadarrAdd.model_validate(self.radarr.model_dump(include=set(RadarrAdd.model_fields)))
         override = self.queries[query_name].radarr if query_name is not None else None
-        if override is not None:
-            # Only the settings the query actually sets replace the radarr section's.
-            add = add.model_copy(update=override.model_dump(exclude_unset=True))
-        return add
+        return _merged(RadarrAdd, self.radarr, override)
+
+    def sonarr_add(self, query_name: str | None = None) -> SonarrAdd | None:
+        """How to add series: the sonarr section's settings, with the saved query's
+        overrides on top. None if there's no usable sonarr section."""
+        override = self.queries[query_name].sonarr if query_name is not None else None
+        return _merged(SonarrAdd, self.sonarr, override)
+
+
+def _merged[A: BaseModel](
+    model: type[A], section: BaseModel | None, override: A | None
+) -> A | None:
+    """The add settings in an app's `section`, with `override` on top."""
+    if section is None:
+        return None
+    add = model.model_validate(section.model_dump(include=set(model.model_fields)))
+    if override is not None:
+        # Only the settings the query actually sets replace the section's.
+        add = add.model_copy(update=override.model_dump(exclude_unset=True))
+    return add
 
 
 def resolve_config_path(explicit: Path | None = None) -> Path:
