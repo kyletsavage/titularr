@@ -1,7 +1,10 @@
+import json
+from dataclasses import replace
+
 import httpx2
 import pytest
 
-from titularr.arr import ArrError, RadarrClient, SonarrClient
+from titularr.arr import ArrError, RadarrAdd, RadarrAddOptions, RadarrClient, SonarrClient
 
 API_KEY = "secret-api-key"
 
@@ -88,3 +91,120 @@ def test_non_json_response_is_an_arr_error():
     client, _ = client_for(RadarrClient, lambda r: httpx2.Response(200, text="<html>login</html>"))
     with pytest.raises(ArrError, match="isn't JSON"):
         client.library_tmdb_ids()
+
+
+# --- adding movies to Radarr ---
+
+PROFILES = [{"id": 1, "name": "Any"}, {"id": 4, "name": "HD-1080p"}]
+FOLDERS = [{"path": "/movies"}, {"path": "/kids/"}]
+
+
+def fake_radarr(post=lambda r: httpx2.Response(201, json={})):
+    """A Radarr handler with two quality profiles and two root folders. `post` answers
+    the add request."""
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/v3/qualityprofile":
+            return httpx2.Response(200, json=PROFILES)
+        if path == "/api/v3/rootfolder":
+            return httpx2.Response(200, json=FOLDERS)
+        if path == "/api/v3/movie/lookup/tmdb":
+            tmdb_id = int(request.url.params["tmdbId"])
+            return httpx2.Response(200, json={"tmdbId": tmdb_id, "title": "Elf", "year": 2003})
+        if path == "/api/v3/movie" and request.method == "POST":
+            return post(request)
+        return httpx2.Response(404)
+
+    return handler
+
+
+def test_prepare_finds_profile_ignoring_case_and_folder_ignoring_trailing_slash():
+    client, _ = client_for(RadarrClient, fake_radarr())
+    add = RadarrAdd(quality_profile="hd-1080P", root_folder="/kids", search_on_add=True)
+
+    assert client.prepare(add) == RadarrAddOptions(
+        quality_profile_id=4,
+        root_folder="/kids/",  # Radarr's own spelling
+        monitored=True,
+        minimum_availability="released",
+        search_on_add=True,
+    )
+
+
+def test_prepare_lists_profiles_when_one_is_unknown():
+    client, _ = client_for(RadarrClient, fake_radarr())
+    add = RadarrAdd(quality_profile="4K", root_folder="/movies")
+
+    with pytest.raises(ArrError, match=r"no quality profile named '4K' \(it has: Any, HD-1080p\)"):
+        client.prepare(add)
+
+
+def test_prepare_lists_root_folders_when_one_is_unknown():
+    client, _ = client_for(RadarrClient, fake_radarr())
+    add = RadarrAdd(quality_profile="Any", root_folder="/Movies")  # paths keep their case
+
+    with pytest.raises(ArrError, match=r"no root folder '/Movies' \(it has: /kids/, /movies\)"):
+        client.prepare(add)
+
+
+OPTIONS = RadarrAddOptions(
+    quality_profile_id=4,
+    root_folder="/movies",
+    monitored=False,
+    minimum_availability="announced",
+    search_on_add=False,
+)
+
+
+def test_add_movie_sends_the_lookup_back_with_the_settings():
+    client, requests = client_for(RadarrClient, fake_radarr())
+
+    assert client.add_movie(10719, OPTIONS) is True
+    lookup, post = requests
+    assert str(lookup.url) == "http://radarr:7878/api/v3/movie/lookup/tmdb?tmdbId=10719"
+    assert post.method == "POST"
+    assert json.loads(post.content) == {
+        "tmdbId": 10719,
+        "title": "Elf",
+        "year": 2003,
+        "qualityProfileId": 4,
+        "rootFolderPath": "/movies",
+        "monitored": False,
+        "minimumAvailability": "announced",
+        "addOptions": {"searchForMovie": False, "monitor": "none"},
+    }
+
+
+def test_monitored_movie_is_added_as_movie_only():
+    client, requests = client_for(RadarrClient, fake_radarr())
+    client.add_movie(1, replace(OPTIONS, monitored=True, search_on_add=True))
+
+    body = json.loads(requests[-1].content)
+    assert body["monitored"] is True
+    assert body["addOptions"] == {"searchForMovie": True, "monitor": "movieOnly"}
+
+
+def test_add_movie_already_in_radarr_returns_false():
+    exists = [
+        {
+            "propertyName": "TmdbId",
+            "errorMessage": "This movie has already been added",
+            "errorCode": "MovieExistsValidator",
+        }
+    ]
+    client, _ = client_for(RadarrClient, fake_radarr(lambda r: httpx2.Response(400, json=exists)))
+    assert client.add_movie(10719, OPTIONS) is False
+
+
+def test_other_validation_errors_are_reported():
+    errors = [
+        {"errorMessage": "Path is not writable", "errorCode": "FolderWritableValidator"},
+        {"errorMessage": "Invalid Path"},
+    ]
+    client, _ = client_for(RadarrClient, fake_radarr(lambda r: httpx2.Response(400, json=errors)))
+
+    with pytest.raises(ArrError) as excinfo:
+        client.add_movie(10719, OPTIONS)
+    assert str(excinfo.value) == "Radarr returned HTTP 400: Path is not writable; Invalid Path"
+    assert excinfo.value.codes == ("FolderWritableValidator",)

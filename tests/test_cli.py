@@ -1,5 +1,6 @@
 """Tests for the `titularr` command (search, run, validate)."""
 
+import json
 import re
 from importlib.metadata import entry_points
 
@@ -107,13 +108,14 @@ def fake_tmdb(monkeypatch):
 _ANSI_CODE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def invoke(*args):
-    """Run `titularr ARGS`; returns (exit code, stdout lines, stderr).
+def invoke(*args, input=None):
+    """Run `titularr ARGS`, with `input` as what's typed; returns (exit code, stdout
+    lines, stderr).
 
     Color codes are removed: Rich adds them when the environment asks for color (as
     CI does), and they can split text such as an option name in Typer's error box.
     """
-    result = runner.invoke(cli.app, list(args))
+    result = runner.invoke(cli.app, list(args), input=input)
     stdout = _ANSI_CODE.sub("", result.stdout)
     stderr = _ANSI_CODE.sub("", result.stderr)
     return result.exit_code, stdout.splitlines(), stderr
@@ -725,3 +727,235 @@ def test_validate_lists_library_checks_and_warnings(fake_arr, tmp_path, monkeypa
     ]
     assert "WARNING: sonarr is in the config but can't be used" in err
     assert fake_arr == []  # validate never contacts the apps
+
+
+# --- adding to Radarr (--apply) ---
+
+APPLY_CONFIG = """\
+sources:
+  tmdb:
+    token: config-token
+radarr:
+  url: http://radarr:7878
+  api_key: radarr-key
+  quality_profile: hd-1080p
+  root_folder: /movies
+queries:
+  kids:
+    text: christmas
+    kinds: [movie]
+    filters:
+      languages: any
+      keep_unknown: true
+    radarr:
+      root_folder: /kids
+"""
+
+
+@pytest.fixture
+def fake_radarr(monkeypatch):
+    """A fake Radarr that has movie 1. Returns (requests made, add answers by TMDB ID).
+
+    Adding succeeds unless an answer is set for that TMDB ID.
+    """
+    from titularr import arr
+
+    requests = []
+    answers = {}
+
+    def handler(request):
+        requests.append(request)
+        path = request.url.path
+        if path == "/api/v3/movie" and request.method == "GET":
+            return httpx2.Response(200, json=[{"tmdbId": 1, "title": "A Christmas Story"}])
+        if path == "/api/v3/qualityprofile":
+            return httpx2.Response(200, json=[{"id": 4, "name": "HD-1080p"}])
+        if path == "/api/v3/rootfolder":
+            return httpx2.Response(200, json=[{"path": "/movies"}, {"path": "/kids"}])
+        if path == "/api/v3/movie/lookup/tmdb":
+            return httpx2.Response(200, json={"tmdbId": int(request.url.params["tmdbId"])})
+        if path == "/api/v3/movie" and request.method == "POST":
+            tmdb_id = json.loads(request.content)["tmdbId"]
+            return answers.get(tmdb_id, httpx2.Response(201, json={}))
+        return httpx2.Response(404)
+
+    real = arr.RadarrClient
+    monkeypatch.setattr(
+        cli,
+        "RadarrClient",
+        lambda url, key: real(url, key, transport=httpx2.MockTransport(handler)),
+    )
+    return requests, answers
+
+
+def posted(requests):
+    return [json.loads(r.content) for r in requests if r.method == "POST"]
+
+
+def can_prompt(monkeypatch):
+    monkeypatch.setattr(cli, "_can_prompt", lambda: True)
+
+
+# Keeps Christmastime (tmdb:2) and Adult Christmas (tmdb:4); 1 is already in Radarr.
+MOVIE_SEARCH = ("search", "christmas", "--kind", "movie", "--any-language", "--keep-unknown")
+
+
+def test_preview_never_adds(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, _ = invoke(*MOVIE_SEARCH)
+
+    assert status == 0
+    assert [r.url.path for r in requests] == ["/api/v3/movie"]  # the library check only
+    assert out[-1] == "4 movies found, 3 matched, 2 kept, 1 in library; 0 warnings"
+
+
+def test_apply_yes_adds_every_kept_movie(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, _ = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 0
+    assert out[-3:] == [
+        f"added: {CHRISTMASTIME}",
+        f"added: {ADULT}",
+        "Radarr: 2 added, 0 already there, 0 failed",
+    ]
+    first, second = posted(requests)
+    assert (first["tmdbId"], second["tmdbId"]) == (2, 4)
+    assert first["qualityProfileId"] == 4
+    assert first["rootFolderPath"] == "/movies"
+    assert first["minimumAvailability"] == "released"
+    assert first["addOptions"] == {"searchForMovie": False, "monitor": "movieOnly"}
+
+
+def test_apply_asks_first_and_no_adds_nothing(fake_tmdb, fake_radarr, tmp_path, monkeypatch):
+    can_prompt(monkeypatch)
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, err = invoke(*MOVIE_SEARCH, "--apply", input="n\n")
+
+    assert status == 0
+    assert "Add 2 movies to Radarr? [y/N]" in err
+    assert out[-1] == "Nothing added."
+    assert posted(requests) == []
+
+
+def test_apply_asks_first_and_yes_adds(fake_tmdb, fake_radarr, tmp_path, monkeypatch):
+    can_prompt(monkeypatch)
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, _ = invoke(*MOVIE_SEARCH, "--apply", input="y\n")
+
+    assert status == 0
+    assert out[-1] == "Radarr: 2 added, 0 already there, 0 failed"
+    assert len(posted(requests)) == 2
+
+
+def test_apply_without_yes_needs_someone_to_answer(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, err = invoke(*MOVIE_SEARCH, "--apply")
+
+    assert status == 2
+    assert "nobody can answer here; add --yes" in err
+    assert requests == [] and fake_tmdb == [] and out == []
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (CONFIG, "--apply needs a usable radarr section in the config to add movies"),
+        (
+            APPLY_CONFIG.replace("  root_folder: /movies\n", ""),
+            "--apply needs radarr.root_folder in the config",
+        ),
+        (
+            APPLY_CONFIG.replace("  quality_profile: hd-1080p\n  root_folder: /movies\n", ""),
+            "--apply needs radarr.quality_profile and radarr.root_folder in the config",
+        ),
+    ],
+)
+def test_apply_needs_radarr_settings(fake_tmdb, fake_radarr, tmp_path, config, message):
+    write_config(tmp_path / "config.yaml", config)
+    status, _, err = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 2
+    assert message in err
+    assert fake_tmdb == []
+
+
+def test_unknown_profile_stops_before_searching(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG.replace("hd-1080p", "4K"))
+    requests, _ = fake_radarr
+    status, out, err = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 1
+    assert "Radarr has no quality profile named '4K' (it has: HD-1080p)" in err
+    assert fake_tmdb == [] and out == [] and posted(requests) == []
+
+
+def test_one_failure_doesnt_stop_the_rest(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    _, answers = fake_radarr
+    answers[2] = httpx2.Response(500, json={"message": "Database is locked"})
+    status, out, _ = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 1
+    assert out[-3:] == [
+        f"failed: {CHRISTMASTIME}: Radarr returned HTTP 500: Database is locked",
+        f"added: {ADULT}",
+        "Radarr: 1 added, 0 already there, 1 failed",
+    ]
+
+
+def test_movie_added_meanwhile_counts_as_already_there(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    _, answers = fake_radarr
+    exists = [{"errorMessage": "already added", "errorCode": "MovieExistsValidator"}]
+    answers[4] = httpx2.Response(400, json=exists)
+    status, out, _ = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 0
+    assert out[-2:] == [f"already in Radarr: {ADULT}", "Radarr: 1 added, 1 already there, 0 failed"]
+
+
+def test_kept_series_are_not_added_yet(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, err = invoke(
+        "search", "christmas", "--any-language", "--keep-unknown", "--apply", "--yes"
+    )
+
+    assert status == 0
+    assert "WARNING: adding series isn't supported yet; 1 series not added" in err
+    assert [body["tmdbId"] for body in posted(requests)] == [2, 4]
+    assert out[-1] == "Radarr: 2 added, 0 already there, 0 failed"
+
+
+def test_nothing_to_add(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    status, out, _ = invoke("search", "story", "--kind", "movie", "--apply", "--yes")
+
+    assert status == 0
+    assert out[-1] == "No movies to add."
+
+
+def test_saved_query_overrides_the_root_folder(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, _, _ = invoke("run", "kids", "--apply", "--yes")
+
+    assert status == 0
+    assert {body["rootFolderPath"] for body in posted(requests)} == {"/kids"}
+
+
+def test_search_error_means_nothing_is_added(fake_radarr, tmp_path, monkeypatch):
+    install_fake_tmdb(monkeypatch, lambda r: httpx2.Response(500))
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, _, err = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 1
+    assert "Nothing was added, because the search didn't finish." in err
+    assert posted(requests) == []
