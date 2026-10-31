@@ -729,7 +729,7 @@ def test_validate_lists_library_checks_and_warnings(fake_arr, tmp_path, monkeypa
     assert fake_arr == []  # validate never contacts the apps
 
 
-# --- adding to Radarr (--apply) ---
+# --- adding to Radarr and Sonarr (--apply) ---
 
 APPLY_CONFIG = """\
 sources:
@@ -740,6 +740,11 @@ radarr:
   api_key: radarr-key
   quality_profile: hd-1080p
   root_folder: /movies
+sonarr:
+  url: http://sonarr:8989
+  api_key: sonarr-key
+  quality_profile: HD-1080p
+  root_folder: /tv
 queries:
   kids:
     text: christmas
@@ -749,6 +754,11 @@ queries:
       keep_unknown: true
     radarr:
       root_folder: /kids
+  anime:
+    text: christmas
+    kinds: [series]
+    sonarr:
+      series_type: anime
 """
 
 
@@ -786,6 +796,47 @@ def fake_radarr(monkeypatch):
         lambda url, key: real(url, key, transport=httpx2.MockTransport(handler)),
     )
     return requests, answers
+
+
+@pytest.fixture
+def fake_sonarr(monkeypatch):
+    """A fake Sonarr with an empty library. Returns (requests made, lookup results by
+    TMDB ID, add answers by TMDB ID).
+
+    A lookup finds the series (with TVDB ID 1000 + its TMDB ID) unless results are set
+    for that TMDB ID; adding succeeds unless an answer is set.
+    """
+    from titularr import arr
+
+    requests = []
+    lookups = {}
+    answers = {}
+
+    def handler(request):
+        requests.append(request)
+        path = request.url.path
+        if path == "/api/v3/series" and request.method == "GET":
+            return httpx2.Response(200, json=[])
+        if path == "/api/v3/qualityprofile":
+            return httpx2.Response(200, json=[{"id": 6, "name": "HD-1080p"}])
+        if path == "/api/v3/rootfolder":
+            return httpx2.Response(200, json=[{"path": "/tv"}])
+        if path == "/api/v3/series/lookup":
+            tmdb_id = int(request.url.params["term"].removeprefix("tmdb:"))
+            found = [{"tmdbId": tmdb_id, "tvdbId": 1000 + tmdb_id}]
+            return httpx2.Response(200, json=lookups.get(tmdb_id, found))
+        if path == "/api/v3/series" and request.method == "POST":
+            tmdb_id = json.loads(request.content)["tmdbId"]
+            return answers.get(tmdb_id, httpx2.Response(201, json={}))
+        return httpx2.Response(404)
+
+    real = arr.SonarrClient
+    monkeypatch.setattr(
+        cli,
+        "SonarrClient",
+        lambda url, key: real(url, key, transport=httpx2.MockTransport(handler)),
+    )
+    return requests, lookups, answers
 
 
 def posted(requests):
@@ -920,17 +971,139 @@ def test_movie_added_meanwhile_counts_as_already_there(fake_tmdb, fake_radarr, t
     assert out[-2:] == [f"already in Radarr: {ADULT}", "Radarr: 1 added, 1 already there, 0 failed"]
 
 
-def test_kept_series_are_not_added_yet(fake_tmdb, fake_radarr, tmp_path):
+BOTH_SEARCH = ("search", "christmas", "--any-language", "--keep-unknown")
+
+
+def test_movies_and_series_are_added_after_one_question(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path, monkeypatch
+):
+    can_prompt(monkeypatch)
     write_config(tmp_path / "config.yaml", APPLY_CONFIG)
-    requests, _ = fake_radarr
-    status, out, err = invoke(
-        "search", "christmas", "--any-language", "--keep-unknown", "--apply", "--yes"
-    )
+    radarr_requests, _ = fake_radarr
+    sonarr_requests, _, _ = fake_sonarr
+    status, out, err = invoke(*BOTH_SEARCH, "--apply", input="y\n")
 
     assert status == 0
-    assert "WARNING: adding series isn't supported yet; 1 series not added" in err
-    assert [body["tmdbId"] for body in posted(requests)] == [2, 4]
-    assert out[-1] == "Radarr: 2 added, 0 already there, 0 failed"
+    assert err.count("[y/N]") == 1
+    assert "Add 2 movies to Radarr and 1 series to Sonarr? [y/N]" in err
+    assert out[-5:] == [
+        f"added: {CHRISTMASTIME}",
+        f"added: {ADULT}",
+        f"added: {WARS}",
+        "Radarr: 2 added, 0 already there, 0 failed",
+        "Sonarr: 1 added, 0 already there, 0 not found, 0 failed",
+    ]
+    assert [body["tmdbId"] for body in posted(radarr_requests)] == [2, 4]
+    (series,) = posted(sonarr_requests)
+    assert series["tvdbId"] == 1010
+    assert series["qualityProfileId"] == 6
+    assert series["rootFolderPath"] == "/tv"
+    assert series["seriesType"] == "standard"
+    assert series["addOptions"] == {
+        "monitor": "all",
+        "searchForMissingEpisodes": False,
+        "searchForCutoffUnmetEpisodes": False,
+    }
+
+
+def test_series_sonarr_cant_find_is_counted_not_failed(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path
+):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, lookups, _ = fake_sonarr
+    lookups[10] = []
+    status, out, _ = invoke(*BOTH_SEARCH, "--kind", "series", "--apply", "--yes")
+
+    assert status == 0
+    assert out[-2:] == [
+        f"not found in Sonarr: {WARS}",
+        "Sonarr: 0 added, 0 already there, 1 not found, 0 failed",
+    ]
+    assert posted(requests) == []
+
+
+def test_series_added_meanwhile_and_failures(fake_tmdb, fake_radarr, fake_sonarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    _, _, answers = fake_sonarr
+    answers[10] = httpx2.Response(500, json={"message": "Database is locked"})
+    status, out, _ = invoke(*BOTH_SEARCH, "--apply", "--yes")
+
+    # Radarr's adds still happen, and a Sonarr failure alone makes the exit status 1.
+    assert status == 1
+    assert out[-3:] == [
+        f"failed: {WARS}: Sonarr returned HTTP 500: Database is locked",
+        "Radarr: 2 added, 0 already there, 0 failed",
+        "Sonarr: 0 added, 0 already there, 0 not found, 1 failed",
+    ]
+
+    exists = [{"errorMessage": "already added", "errorCode": "SeriesExistsValidator"}]
+    answers[10] = httpx2.Response(400, json=exists)
+    status, out, _ = invoke(*BOTH_SEARCH, "--kind", "series", "--apply", "--yes")
+    assert status == 0
+    assert out[-2:] == [
+        f"already in Sonarr: {WARS}",
+        "Sonarr: 0 added, 1 already there, 0 not found, 0 failed",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            APPLY_CONFIG.replace(
+                "sonarr:\n  url: http://sonarr:8989\n  api_key: sonarr-key\n"
+                "  quality_profile: HD-1080p\n  root_folder: /tv\n",
+                "",
+            ),
+            "--apply needs a usable sonarr section in the config to add series",
+        ),
+        (
+            APPLY_CONFIG.replace("  root_folder: /tv\n", ""),
+            "--apply needs sonarr.root_folder in the config",
+        ),
+    ],
+)
+def test_apply_needs_sonarr_settings_when_series_are_searched(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path, config, message
+):
+    write_config(tmp_path / "config.yaml", config)
+    status, _, err = invoke(*BOTH_SEARCH, "--apply", "--yes")
+
+    assert status == 2
+    assert message in err
+    assert fake_tmdb == []
+
+    # A movies-only search doesn't need Sonarr at all.
+    status, _, _ = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+    assert status == 0
+
+
+def test_unknown_sonarr_folder_stops_before_searching(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path
+):
+    write_config(
+        tmp_path / "config.yaml", APPLY_CONFIG.replace("root_folder: /tv", "root_folder: /TV")
+    )
+    radarr_requests, _ = fake_radarr
+    status, out, err = invoke(*BOTH_SEARCH, "--apply", "--yes")
+
+    assert status == 1
+    assert "Sonarr has no root folder '/TV' (it has: /tv)" in err
+    assert fake_tmdb == [] and out == [] and posted(radarr_requests) == []
+
+
+def test_series_only_query_uses_its_overrides_and_never_contacts_radarr(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path
+):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    radarr_requests, _ = fake_radarr
+    sonarr_requests, _, _ = fake_sonarr
+    status, out, _ = invoke("run", "anime", "--apply", "--yes")
+
+    assert status == 0
+    assert radarr_requests == []
+    assert [body["seriesType"] for body in posted(sonarr_requests)] == ["anime"]
+    assert out[-1] == "Sonarr: 1 added, 0 already there, 0 not found, 0 failed"
 
 
 def test_nothing_to_add(fake_tmdb, fake_radarr, tmp_path):
@@ -938,7 +1111,7 @@ def test_nothing_to_add(fake_tmdb, fake_radarr, tmp_path):
     status, out, _ = invoke("search", "story", "--kind", "movie", "--apply", "--yes")
 
     assert status == 0
-    assert out[-1] == "No movies to add."
+    assert out[-1] == "Nothing to add."
 
 
 def test_saved_query_overrides_the_root_folder(fake_tmdb, fake_radarr, tmp_path):
