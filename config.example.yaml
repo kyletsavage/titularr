@@ -18,6 +18,7 @@ sources:
 #   # monitored: true                  # default: true
 #   # minimum_availability: released   # announced, inCinemas or released (default)
 #   # search_on_add: false             # default: false; review what was added first
+#   # tags: [english]                  # existing Radarr tags (see below); default: none
 # sonarr:
 #   url: http://sonarr:8989
 #   api_key: ${SONARR_API_KEY}
@@ -31,6 +32,11 @@ sources:
 #   # series_type: standard            # standard (default), daily or anime
 #   # monitor_new_items: all           # new seasons: all (default) or none
 #   # search_on_add: false             # default: false; review what was added first
+#   # tags: [english]                  # existing Sonarr tags (see below); default: none
+#
+# Tags decide which release profiles (required/ignored words), indexers and download
+# clients apply to a title, so they must already exist in the app: a missing one is an
+# error, never created. A query's own tags replace these ones.
 
 # Never keep these titles, in any query. Checked alongside each query's own exclusions;
 # excluded titles say which list excluded them ("global:" or "query:").
@@ -70,3 +76,4 @@ queries:
   #   sonarr:                  # this query's own add settings, replacing the sonarr section's
   #     series_type: anime
   #     root_folder: /anime
+  #     tags: [anime]          # replaces the sonarr section's tags for this query

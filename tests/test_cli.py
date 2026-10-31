@@ -780,6 +780,8 @@ def fake_radarr(monkeypatch):
             return httpx2.Response(200, json=[{"tmdbId": 1, "title": "A Christmas Story"}])
         if path == "/api/v3/qualityprofile":
             return httpx2.Response(200, json=[{"id": 4, "name": "HD-1080p"}])
+        if path == "/api/v3/tag":
+            return httpx2.Response(200, json=[{"id": 3, "label": "anime"}])
         if path == "/api/v3/rootfolder":
             return httpx2.Response(200, json=[{"path": "/movies"}, {"path": "/kids"}])
         if path == "/api/v3/movie/lookup/tmdb":
@@ -819,6 +821,8 @@ def fake_sonarr(monkeypatch):
             return httpx2.Response(200, json=[])
         if path == "/api/v3/qualityprofile":
             return httpx2.Response(200, json=[{"id": 6, "name": "HD-1080p"}])
+        if path == "/api/v3/tag":
+            return httpx2.Response(200, json=[{"id": 3, "label": "anime"}])
         if path == "/api/v3/rootfolder":
             return httpx2.Response(200, json=[{"path": "/tv"}])
         if path == "/api/v3/series/lookup":
@@ -1132,3 +1136,36 @@ def test_search_error_means_nothing_is_added(fake_radarr, tmp_path, monkeypatch)
     assert status == 1
     assert "Nothing was added, because the search didn't finish." in err
     assert posted(requests) == []
+
+
+# --- tags ---
+
+TAGGED_CONFIG = APPLY_CONFIG.replace(
+    "  root_folder: /tv\n", "  root_folder: /tv\n  tags: [Anime]\n"
+)
+
+
+def test_question_names_the_tags_and_titles_carry_them(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path, monkeypatch
+):
+    can_prompt(monkeypatch)
+    write_config(tmp_path / "config.yaml", TAGGED_CONFIG)
+    radarr_requests, _ = fake_radarr
+    sonarr_requests, _, _ = fake_sonarr
+    status, _, err = invoke(*BOTH_SEARCH, "--apply", input="y\n")
+
+    assert status == 0
+    assert "Add 2 movies to Radarr and 1 series to Sonarr (tags: anime)? [y/N]" in err
+    assert [body["tags"] for body in posted(radarr_requests)] == [[], []]
+    assert [body["tags"] for body in posted(sonarr_requests)] == [[3]]
+
+
+def test_missing_tag_stops_before_searching(fake_tmdb, fake_radarr, fake_sonarr, tmp_path):
+    write_config(tmp_path / "config.yaml", TAGGED_CONFIG.replace("[Anime]", "[anime, dubbed]"))
+    sonarr_requests, _, _ = fake_sonarr
+    status, out, err = invoke(*BOTH_SEARCH, "--apply", "--yes")
+
+    assert status == 1
+    assert "Sonarr has no tag named 'dubbed' (it has: anime)" in err
+    assert fake_tmdb == [] and out == []
+    assert all(r.method == "GET" for r in sonarr_requests)  # no tag was created

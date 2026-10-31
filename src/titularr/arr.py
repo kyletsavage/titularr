@@ -9,10 +9,10 @@ else reads.
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 import httpx2
-from pydantic import BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict
 
 # Whole libraries come back in one response, which can take a while for large ones.
 TIMEOUT_SECONDS = 30.0
@@ -41,6 +41,17 @@ AddResult = Literal["added", "exists", "not_found"]
 """What happened to one title: added, already in the app, or not found by the app."""
 
 
+def _unique_tags(tags: tuple[str, ...]) -> tuple[str, ...]:
+    # The apps store tags in lowercase, so "Anime" and "anime" are the same tag.
+    return tuple(dict.fromkeys(tag.strip().lower() for tag in tags))
+
+
+Tags = Annotated[tuple[str, ...], AfterValidator(_unique_tags)]
+"""Tag names, as the app shows them. In Radarr and Sonarr, a title's tags decide which
+release profiles, indexers, download clients and delay profiles apply to it, so they
+must already exist: they're never created."""
+
+
 class ArrError(Exception):
     """Radarr or Sonarr couldn't be reached, or returned an error.
 
@@ -67,17 +78,19 @@ class RadarrAdd(BaseModel):
     monitored: bool = True
     minimum_availability: MinimumAvailability = "released"
     search_on_add: bool = False
+    tags: Tags = ()
 
 
 @dataclass(frozen=True)
 class RadarrAddOptions:
-    """`RadarrAdd` checked against Radarr, with the quality profile as its ID."""
+    """`RadarrAdd` checked against Radarr, with the quality profile and tags as IDs."""
 
     quality_profile_id: int
     root_folder: str
     monitored: bool
     minimum_availability: MinimumAvailability
     search_on_add: bool
+    tag_ids: tuple[int, ...] = ()
 
 
 class SonarrAdd(BaseModel):
@@ -98,11 +111,12 @@ class SonarrAdd(BaseModel):
     series_type: SeriesType = "standard"
     monitor_new_items: Literal["all", "none"] = "all"
     search_on_add: bool = False
+    tags: Tags = ()
 
 
 @dataclass(frozen=True)
 class SonarrAddOptions:
-    """`SonarrAdd` checked against Sonarr, with the quality profile as its ID."""
+    """`SonarrAdd` checked against Sonarr, with the quality profile and tags as IDs."""
 
     quality_profile_id: int
     root_folder: str
@@ -111,6 +125,7 @@ class SonarrAddOptions:
     series_type: SeriesType
     monitor_new_items: Literal["all", "none"]
     search_on_add: bool
+    tag_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,24 @@ class _ArrClient:
             )
         return profile_id, root_folder
 
+    def _tag_ids(self, names: tuple[str, ...]) -> tuple[int, ...]:
+        """The IDs of the tags with these names. Raises ArrError naming the app's tags
+        when one doesn't exist."""
+        if not names:
+            return ()
+        tags = {t["label"]: t["id"] for t in self._get("api/v3/tag")}
+        ids = []
+        for name in names:
+            tag_id = _find(tags, name, str.casefold)
+            if tag_id is None:
+                raise ArrError(
+                    f"{self.app} has no tag named {name!r} "
+                    f"(it has: {', '.join(sorted(tags)) or 'none'}); tags aren't created, "
+                    "since they decide which release profiles apply"
+                )
+            ids.append(tag_id)
+        return tuple(ids)
+
     def _add(self, path: str, body: dict[str, Any]) -> AddResult:
         """POST a title to add; "exists" if the app already has it."""
         try:
@@ -216,7 +249,8 @@ class RadarrClient(_ArrClient):
         return {movie["tmdbId"] for movie in self._get("api/v3/movie") if movie.get("tmdbId")}
 
     def prepare(self, add: RadarrAdd) -> RadarrAddOptions:
-        """Check the add settings against Radarr: the profile and root folder must exist."""
+        """Check the add settings against Radarr: the profile, root folder and tags
+        must exist."""
         profile_id, root_folder = self._profile_and_folder(add.quality_profile, add.root_folder)
         return RadarrAddOptions(
             quality_profile_id=profile_id,
@@ -224,6 +258,7 @@ class RadarrClient(_ArrClient):
             monitored=add.monitored,
             minimum_availability=add.minimum_availability,
             search_on_add=add.search_on_add,
+            tag_ids=self._tag_ids(add.tags),
         )
 
     def add_movie(self, tmdb_id: int, options: RadarrAddOptions) -> AddResult:
@@ -238,6 +273,7 @@ class RadarrClient(_ArrClient):
             rootFolderPath=options.root_folder,
             monitored=options.monitored,
             minimumAvailability=options.minimum_availability,
+            tags=list(options.tag_ids),
             addOptions={
                 "searchForMovie": options.search_on_add,
                 "monitor": "movieOnly" if options.monitored else "none",
@@ -251,7 +287,8 @@ class SonarrClient(_ArrClient):
     exists_code = "SeriesExistsValidator"
 
     def prepare(self, add: SonarrAdd) -> SonarrAddOptions:
-        """Check the add settings against Sonarr: the profile and root folder must exist."""
+        """Check the add settings against Sonarr: the profile, root folder and tags
+        must exist."""
         profile_id, root_folder = self._profile_and_folder(add.quality_profile, add.root_folder)
         return SonarrAddOptions(
             quality_profile_id=profile_id,
@@ -261,6 +298,7 @@ class SonarrClient(_ArrClient):
             series_type=add.series_type,
             monitor_new_items=add.monitor_new_items,
             search_on_add=add.search_on_add,
+            tag_ids=self._tag_ids(add.tags),
         )
 
     def add_series(self, tmdb_id: int, options: SonarrAddOptions) -> AddResult:
@@ -282,6 +320,7 @@ class SonarrClient(_ArrClient):
             seasonFolder=options.season_folder,
             seriesType=options.series_type,
             monitorNewItems=options.monitor_new_items,
+            tags=list(options.tag_ids),
             addOptions={
                 "monitor": options.monitor,
                 "searchForMissingEpisodes": options.search_on_add,

@@ -404,3 +404,28 @@ def test_unusable_sonarr_section_with_add_settings_is_still_a_warning(write, mon
 
     assert config.sonarr is None
     assert "UNSET_SONARR_KEY is not set" in config.warnings[0]
+
+
+# --- tags ---
+
+
+def test_query_tags_replace_the_sections(write):
+    text = (
+        MINIMAL
+        + SONARR
+        + "  tags: [english, hevc]\n"
+        + "queries:\n"
+        + "  anime:\n    text: gundam\n    sonarr:\n      tags: [Anime]\n"
+        + "  untagged:\n    text: gundam\n    sonarr:\n      tags: []\n"
+        + "  plain:\n    text: gundam\n"
+    )
+    config = load_config(write(text))
+
+    assert config.sonarr_add("anime").tags == ("anime",)
+    assert config.sonarr_add("untagged").tags == ()
+    assert config.sonarr_add("plain").tags == ("english", "hevc")
+
+
+def test_tags_must_be_a_list(write):
+    with pytest.raises(ConfigError, match="radarr.tags"):
+        load_config(write(MINIMAL + RADARR + "  tags: anime\n"))
