@@ -123,6 +123,22 @@ def search(
     min_votes: Annotated[
         int | None, typer.Option(help="Minimum TMDB vote count.", rich_help_panel="Filters")
     ] = None,
+    runtime_min: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            help="Shortest runtime to keep, in minutes. Movies only; one TMDB request per title.",
+            rich_help_panel="Filters",
+        ),
+    ] = None,
+    runtime_max: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            help="Longest runtime to keep, in minutes. Movies only; one TMDB request per title.",
+            rich_help_panel="Filters",
+        ),
+    ] = None,
     keep_unknown: Annotated[
         bool,
         typer.Option(
@@ -184,6 +200,8 @@ def search(
         "year_max": year_max,
         "min_rating": min_rating,
         "min_votes": min_votes,
+        "runtime_min": runtime_min,
+        "runtime_max": runtime_max,
         "keep_unknown": keep_unknown,
     }
     # Leaving "languages" out keeps Filters' default (English only).

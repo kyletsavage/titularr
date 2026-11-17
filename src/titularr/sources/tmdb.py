@@ -34,7 +34,12 @@ DEFAULT_RETRY_AFTER_SECONDS = 1.0
 
 
 class TmdbError(Exception):
-    """TMDB returned an error, or a response we couldn't understand."""
+    """TMDB returned an error, or a response we couldn't understand. `status_code` is
+    the HTTP status for an error response, else None."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class _Result(BaseModel):
@@ -91,6 +96,12 @@ class _SeriesResult(_Result):
             vote_count=self.vote_count,
             adult=self.adult,
         )
+
+
+class _MovieDetails(BaseModel):
+    """The one field of /movie/{id} that Titularr uses."""
+
+    runtime: int | None = None  # minutes; TMDB gives 0 when unknown
 
 
 class _SearchPage(BaseModel):
@@ -182,6 +193,23 @@ class TmdbClient:
     def search_series(self, query: str, *, adult: AdultMode = "exclude") -> Iterator[Candidate]:
         """Yield every TV series TMDB returns for `query`, fetching page after page."""
         return self._search("/search/tv", _SeriesResult, query, adult)
+
+    def movie_runtime(self, tmdb_id: int) -> int | None:
+        """A movie's runtime in minutes, or None if TMDB doesn't know it (including a
+        movie removed from TMDB since it was found)."""
+        path = f"/movie/{tmdb_id}"
+        try:
+            data = self._get(path, {})
+        except TmdbError as e:
+            if e.status_code == 404:
+                log.info("TMDB has no movie %d any more; its runtime is unknown", tmdb_id)
+                return None
+            raise
+        try:
+            runtime = _MovieDetails.model_validate(data).runtime
+        except ValidationError as e:
+            raise TmdbError(f"unexpected response from TMDB {path}: {e}") from e
+        return runtime or None
 
     def _search(
         self, path: str, result_model: type[_Result], query: str, adult: AdultMode
@@ -292,5 +320,5 @@ class TmdbClient:
             log.info("TMDB rate limit hit; retrying in %.1fs", delay)
             time.sleep(delay)
         if response.is_error:
-            raise TmdbError(_error_message(response))
+            raise TmdbError(_error_message(response), response.status_code)
         return response.json()

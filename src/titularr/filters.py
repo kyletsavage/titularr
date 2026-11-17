@@ -1,7 +1,10 @@
-"""Filters: narrow matched titles by year, original language, rating and votes.
+"""Filters: narrow matched titles by year, original language, rating, votes and runtime.
 
 Every check that fails produces a short, human-readable reason, so a run can always
 explain why a title was dropped.
+
+Runtime isn't in search results, so it's checked separately (`runtime_reasons`), after
+a lookup, and only for titles that pass everything else.
 """
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -31,6 +34,9 @@ class Filters(BaseModel):
     languages: frozenset[str] | None = DEFAULT_LANGUAGES
     min_rating: float | None = Field(default=None, ge=0, le=10)
     min_votes: int | None = Field(default=None, ge=0)
+    # In minutes. Movies only: each check costs one TMDB request per title.
+    runtime_min: int | None = Field(default=None, ge=1)
+    runtime_max: int | None = Field(default=None, ge=1)
     keep_unknown: bool = False
 
     @field_validator("languages", mode="before")
@@ -59,15 +65,28 @@ class Filters(BaseModel):
             and self.year_min > self.year_max
         ):
             raise ValueError(f"year_min ({self.year_min}) is after year_max ({self.year_max})")
+        if (
+            self.runtime_min is not None
+            and self.runtime_max is not None
+            and self.runtime_min > self.runtime_max
+        ):
+            raise ValueError(
+                f"runtime_min ({self.runtime_min}) is more than runtime_max ({self.runtime_max})"
+            )
         return self
 
     @property
     def active(self) -> bool:
         """Whether any filter is set."""
-        return any(
+        return self.needs_runtime or any(
             v is not None
             for v in (self.year_min, self.year_max, self.languages, self.min_rating, self.min_votes)
         )
+
+    @property
+    def needs_runtime(self) -> bool:
+        """Whether a runtime filter is set, so each title's runtime must be looked up."""
+        return self.runtime_min is not None or self.runtime_max is not None
 
     def reasons(self, candidate: Candidate) -> list[str]:
         """Every reason this candidate fails the filters; an empty list means it passes."""
@@ -109,3 +128,16 @@ class Filters(BaseModel):
                 reasons.append(f"votes {votes} < {self.min_votes}")
 
         return reasons
+
+    def runtime_reasons(self, runtime: int | None) -> list[str]:
+        """Why a title with this runtime (minutes; None or 0 if unknown) fails the
+        runtime filters; an empty list means it passes."""
+        if not self.needs_runtime:
+            return []
+        if not runtime:  # TMDB gives 0 when it has no runtime
+            return [] if self.keep_unknown else ["runtime unknown"]
+        if self.runtime_min is not None and runtime < self.runtime_min:
+            return [f"runtime {runtime} min < {self.runtime_min}"]
+        if self.runtime_max is not None and runtime > self.runtime_max:
+            return [f"runtime {runtime} min > {self.runtime_max}"]
+        return []

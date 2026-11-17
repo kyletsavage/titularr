@@ -137,6 +137,12 @@ def test_unknown_value_for_an_unset_filter_is_fine():
         ({"min_rating": -1}, "greater than or equal to 0"),
         ({"min_votes": -5}, "greater than or equal to 0"),
         ({"languages": {"en", " "}}, "language codes must not be empty"),
+        (
+            {"runtime_min": 120, "runtime_max": 90},
+            "runtime_min .120. is more than runtime_max .90.",
+        ),
+        ({"runtime_min": 0}, "greater than or equal to 1"),
+        ({"runtime_max": -5}, "greater than or equal to 1"),
     ],
 )
 def test_invalid_filters_are_rejected(kwargs, message):
@@ -148,6 +154,7 @@ def test_active_when_any_filter_is_set():
     assert Filters(languages=None, min_votes=0).active
     assert Filters(languages={"ja"}).active
     assert not Filters(languages=None, keep_unknown=True).active
+    assert Filters(languages=None, runtime_max=180).active
 
 
 @pytest.mark.parametrize("value", ["any", "ANY", " any "])
@@ -160,3 +167,38 @@ def test_languages_any_means_any_language(value):
 def test_filters_reject_unknown_fields():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Filters(min_vote=5)
+
+
+# --- runtime (checked separately, after a lookup) ---
+
+
+@pytest.mark.parametrize(
+    ("filters", "runtime", "expected"),
+    [
+        (Filters(runtime_min=80), 94, []),
+        (Filters(runtime_min=80), 80, []),
+        (Filters(runtime_min=80), 72, ["runtime 72 min < 80"]),
+        (Filters(runtime_max=180), 190, ["runtime 190 min > 180"]),
+        (Filters(runtime_min=80, runtime_max=180), 120, []),
+        (Filters(runtime_min=80, runtime_max=180), 181, ["runtime 181 min > 180"]),
+    ],
+)
+def test_runtime_range(filters, runtime, expected):
+    assert filters.runtime_reasons(runtime) == expected
+
+
+@pytest.mark.parametrize("runtime", [None, 0])
+def test_unknown_runtime_is_dropped_unless_keep_unknown(runtime):
+    assert Filters(runtime_min=80).runtime_reasons(runtime) == ["runtime unknown"]
+    assert Filters(runtime_min=80, keep_unknown=True).runtime_reasons(runtime) == []
+
+
+def test_needs_runtime_only_with_a_runtime_filter():
+    assert not Filters(min_votes=5).needs_runtime
+    assert Filters(runtime_min=80).needs_runtime
+    assert Filters(runtime_max=180).needs_runtime
+    assert Filters().runtime_reasons(None) == []  # no runtime filter: nothing to check
+
+
+def test_runtime_isnt_part_of_the_candidate_checks():
+    assert Filters(languages=None, runtime_min=80).reasons(candidate()) == []

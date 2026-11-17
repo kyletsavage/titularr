@@ -28,6 +28,7 @@ class FakeSource:
     def __init__(self, movies=(), series=()):
         self.movies = list(movies)
         self.series = list(series)
+        self.runtimes = {}
         self.calls = []
 
     def search_movies(self, query, *, adult="exclude"):
@@ -37,6 +38,10 @@ class FakeSource:
     def search_series(self, query, *, adult="exclude"):
         self.calls.append(("series", query, adult))
         yield from self.series
+
+    def movie_runtime(self, tmdb_id):
+        self.calls.append(("runtime", tmdb_id))
+        return self.runtimes.get(tmdb_id)
 
 
 # --- Query ---
@@ -266,3 +271,79 @@ def test_run_and_summary_count_in_library():
 
     counts = summary.counts["movie"]
     assert (counts.found, counts.matched, counts.kept, counts.in_library) == (2, 2, 1, 1)
+
+
+# --- runtime filter ---
+
+RUNTIME_QUERY = Query(text="christmas", kinds=("movie",), filters=Filters(runtime_min=80))
+
+
+class Lookups:
+    """A runtime lookup that records which TMDB IDs it was asked for."""
+
+    def __init__(self, runtimes):
+        self.runtimes = runtimes
+        self.asked = []
+
+    def __call__(self, tmdb_id):
+        self.asked.append(tmdb_id)
+        return self.runtimes.get(tmdb_id)
+
+
+def test_runtime_filter_drops_short_movies_and_keeps_the_rest():
+    lookup = Lookups({1: 94, 2: 45})
+    kept = decide(RUNTIME_QUERY, candidate(1), runtime=lookup)
+    short = decide(RUNTIME_QUERY, candidate(2), runtime=lookup)
+
+    assert kept.status == "kept"
+    assert (short.status, short.reasons) == ("filtered", ("runtime 45 min < 80",))
+    assert lookup.asked == [1, 2]
+
+
+def test_runtime_is_only_looked_up_for_titles_that_would_be_added():
+    query = Query(
+        text="christmas",
+        kinds=("movie",),
+        filters=Filters(runtime_min=80, min_votes=100),
+        exclusions=Exclusions(ids={"movie:2"}),
+    )
+    library = Library(movie_ids=frozenset({4}))
+    lookup = Lookups({})
+    statuses = [
+        decide(query, c, library, lookup).status
+        for c in (candidate(1, title="Elf"), candidate(2), candidate(3, votes=5), candidate(4))
+    ]
+
+    assert statuses == ["no_match", "excluded", "filtered", "in_library"]
+    assert lookup.asked == []
+
+
+def test_no_runtime_lookup_without_a_runtime_filter():
+    source = FakeSource(movies=[candidate(1)])
+    decisions = list(run(Query(text="christmas", kinds=("movie",)), source))
+
+    assert [d.status for d in decisions] == ["kept"]
+    assert ("runtime", 1) not in source.calls
+
+
+def test_run_looks_up_runtimes_from_the_source():
+    source = FakeSource(movies=[candidate(1), candidate(2)])
+    source.runtimes = {1: 94}  # 2 unknown
+    decisions = list(run(RUNTIME_QUERY, source))
+
+    assert [(d.status, d.reasons) for d in decisions] == [
+        ("kept", ()),
+        ("filtered", ("runtime unknown",)),
+    ]
+    assert source.calls == [("movie", "christmas", "exclude"), ("runtime", 1), ("runtime", 2)]
+
+
+def test_decide_with_a_runtime_filter_needs_a_lookup():
+    with pytest.raises(ValueError, match="runtime lookup is needed"):
+        decide(RUNTIME_QUERY, candidate(1))
+
+
+@pytest.mark.parametrize("kinds", [("movie", "series"), ("series",)])
+def test_runtime_filters_are_for_movies_only(kinds):
+    with pytest.raises(ValidationError, match="runtime filters work for movies only"):
+        Query(text="christmas", kinds=kinds, filters=Filters(runtime_max=180))

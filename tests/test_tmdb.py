@@ -483,3 +483,42 @@ def test_series_adult_modes(mode, sent, expected_ids):
 
     assert requests[0].url.params["include_adult"] == sent
     assert [s.tmdb_id for s in results] == expected_ids
+
+
+# --- Movie runtime (/movie/{id}) ---
+
+
+def test_movie_runtime_reads_the_movie_details():
+    client, requests = client_for(
+        lambda request: httpx2.Response(200, json={"id": 1428364, "runtime": 94, "title": "X"})
+    )
+
+    assert client.movie_runtime(1428364) == 94
+    (request,) = requests
+    assert request.url.path == "/3/movie/1428364"
+    assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.parametrize("body", [{"id": 1, "runtime": 0}, {"id": 1}, {"id": 1, "runtime": None}])
+def test_movie_runtime_unknown_is_none(body):
+    client, _ = client_for(lambda request: httpx2.Response(200, json=body))
+    assert client.movie_runtime(1) is None
+
+
+def test_movie_runtime_of_a_removed_movie_is_none():
+    body = {"status_code": 34, "status_message": "The resource you requested could not be found."}
+    client, _ = client_for(lambda request: httpx2.Response(404, json=body))
+    assert client.movie_runtime(1) is None
+
+
+def test_movie_runtime_other_errors_raise():
+    client, _ = client_for(lambda request: httpx2.Response(401, json={"status_message": "nope"}))
+    with pytest.raises(TmdbError, match="401") as excinfo:
+        client.movie_runtime(1)
+    assert excinfo.value.status_code == 401
+
+
+def test_movie_runtime_unexpected_response_raises():
+    client, _ = client_for(lambda request: httpx2.Response(200, json={"runtime": "long"}))
+    with pytest.raises(TmdbError, match="unexpected response"):
+        client.movie_runtime(1)

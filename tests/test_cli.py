@@ -45,6 +45,9 @@ SERIES = [
     {"id": 11, "name": "Holiday Baking", "first_air_date": "2015-05-05"},
 ]
 
+# Runtimes in minutes for /movie/{id}; others have none (TMDB answers 0).
+RUNTIMES = {1: 94, 2: 45}
+
 STORY = "[movie] A Christmas Story (1983)  tmdb:1  lang:en  rating:7.3  votes:2900"
 CHRISTMASTIME = "[movie] Christmastime (2012)  tmdb:2  lang:en  rating:5.0  votes:4"
 ADULT = "[movie] Adult Christmas (2010)  tmdb:4  lang:?  rating:?  votes:?"
@@ -95,6 +98,9 @@ def fake_tmdb(monkeypatch):
 
     def handler(request):
         requests.append(request)
+        if match := re.fullmatch(r"/3/movie/(\d+)", request.url.path):
+            tmdb_id = int(match.group(1))
+            return httpx2.Response(200, json={"id": tmdb_id, "runtime": RUNTIMES.get(tmdb_id, 0)})
         results = MOVIES if request.url.path.endswith("/movie") else SERIES
         return httpx2.Response(
             200,
@@ -1498,3 +1504,34 @@ def test_validate_lists_scheduled_queries(tmp_path):
 
     assert status == 0
     assert out[0].endswith("library check: Radarr, Sonarr, scheduled: kids, anime")
+
+
+# --- runtime filter ---
+
+
+def test_search_runtime_min_drops_short_movies(fake_tmdb):
+    status, out, _ = invoke(*MOVIE_SEARCH, "--runtime-min", "80", "--show-dropped")
+
+    assert status == 0
+    assert STORY in out
+    assert f"{CHRISTMASTIME} (filtered: runtime 45 min < 80)" in out
+    runtime_paths = [r.url.path for r in fake_tmdb if "/movie/" in r.url.path]
+    assert runtime_paths  # one lookup per title that passed everything else
+    assert len(runtime_paths) == len(set(runtime_paths))
+
+
+def test_search_runtime_filter_needs_movies_only(fake_tmdb):
+    status, _, err = invoke("search", "christmas", "--runtime-max", "180")
+
+    assert status == 2
+    assert "runtime filters work for movies only" in err
+    assert fake_tmdb == []
+
+
+def test_saved_query_with_runtime_filter_and_series_fails_validate(tmp_path):
+    text = CONFIG + "  long-ones:\n    text: christmas\n    filters:\n      runtime_max: 180\n"
+    write_config(tmp_path / "config.yaml", text)
+    status, _, err = invoke("validate")
+
+    assert status == 2
+    assert "runtime filters work for movies only" in err

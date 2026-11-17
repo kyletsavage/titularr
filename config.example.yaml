@@ -59,6 +59,8 @@ queries:
       year_min: 1940
       min_votes: 500
       # languages: [en]        # default: English only; "any" for every language
+      # runtime_min: 80        # minutes (also runtime_max). Movies only (kinds: [movie]):
+      #                        # each title that would be added costs one TMDB request
 
   dracula:
     text: dracula              # titles containing "dracula"...
