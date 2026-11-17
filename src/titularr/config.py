@@ -28,6 +28,8 @@ CONFIG_ENV_VAR = "TITULARR_CONFIG"
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 # The run history file, in the config file's folder unless `history:` says otherwise.
 DEFAULT_HISTORY_FILE = "titularr.db"
+# The most titles one --apply --yes run may add; more, and it adds none.
+DEFAULT_MAX_ADDS = 10
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _QUERY_NAME = re.compile(r"[A-Za-z0-9_-]+")
@@ -78,6 +80,8 @@ class SavedQuery(Query):
 
     radarr: RadarrAdd | None = None
     sonarr: SonarrAdd | None = None
+    # With --apply --yes nobody reviews the titles, so more than this adds none.
+    max_adds: int = Field(default=DEFAULT_MAX_ADDS, ge=1)
 
 
 # Which kind of title each app's library covers.

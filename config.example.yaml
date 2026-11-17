@@ -71,6 +71,8 @@ queries:
       titles: [dead and loving]  # ...except the 1995 parody "Dracula: Dead and Loving It"
     # radarr:                  # this query's own add settings, replacing the radarr section's
     #   root_folder: /horror
+    # max_adds: 10             # with --apply --yes: if more titles than this would be
+    #                          # added, none are (default: 10). Asking first has no limit.
 
   # gundam:
   #   text: gundam
