@@ -76,6 +76,25 @@ def test_unset_env_variable_is_named(write, monkeypatch):
         load_config(path)
 
 
+def test_unset_env_variable_is_left_as_is_without_secrets(write, monkeypatch):
+    monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
+    path = write(MINIMAL.replace("abc", "${NOT_SET_ANYWHERE}") + "history: runs.db\n")
+    config = load_config(path, need_secrets=False)
+
+    assert config.sources.tmdb.token == "${NOT_SET_ANYWHERE}"
+    assert config.history_path == path.parent / "runs.db"
+
+
+def test_unusable_reason_names_the_unset_variable(write, monkeypatch):
+    monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
+    path = write(MINIMAL + "radarr:\n  url: http://radarr:7878\n  api_key: ${NOT_SET_ANYWHERE}\n")
+    config = load_config(path)
+
+    assert config.radarr is None
+    assert config.unusable_reason("radarr") == "NOT_SET_ANYWHERE is not set"
+    assert config.unusable_reason("sonarr") is None  # not in the file
+
+
 def test_env_values_cant_change_the_yaml_structure(write, monkeypatch):
     monkeypatch.setenv("TOKEN", "abc\nqueries: {hacked: {text: x}}")
     config = load_config(write(MINIMAL.replace("abc", "${TOKEN}")))

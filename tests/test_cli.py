@@ -920,10 +920,27 @@ def test_apply_without_yes_needs_someone_to_answer(fake_tmdb, fake_radarr, tmp_p
     assert requests == [] and fake_tmdb == [] and out == []
 
 
+def test_apply_names_why_the_radarr_section_cant_be_used(
+    fake_tmdb, fake_radarr, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("UNSET_RADARR_KEY", raising=False)
+    text = APPLY_CONFIG.replace("api_key: radarr-key", "api_key: ${UNSET_RADARR_KEY}")
+    write_config(tmp_path / "config.yaml", text)
+    status, out, err = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 2
+    assert (
+        "--apply needs a usable radarr section in the config to add movies "
+        "(radarr can't be used: UNSET_RADARR_KEY is not set)"
+    ) in err
+    requests, _ = fake_radarr
+    assert requests == [] and fake_tmdb == [] and out == []
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [
-        (CONFIG, "--apply needs a usable radarr section in the config to add movies"),
+        (CONFIG, "--apply needs a radarr section in the config to add movies"),
         (
             APPLY_CONFIG.replace("  root_folder: /movies\n", ""),
             "--apply needs radarr.root_folder in the config",
@@ -1062,7 +1079,7 @@ def test_series_added_meanwhile_and_failures(fake_tmdb, fake_radarr, fake_sonarr
                 "  quality_profile: HD-1080p\n  root_folder: /tv\n",
                 "",
             ),
-            "--apply needs a usable sonarr section in the config to add series",
+            "--apply needs a sonarr section in the config to add series",
         ),
         (
             APPLY_CONFIG.replace("  root_folder: /tv\n", ""),
@@ -1243,6 +1260,29 @@ def test_history_without_any_runs(tmp_path):
     assert status == 0
     assert out == ["No runs recorded yet."]
     assert not (tmp_path / "titularr.db").exists()  # looking doesn't create the file
+
+
+def test_history_doesnt_need_the_secrets(fake_tmdb, fake_radarr, tmp_path, monkeypatch):
+    # The secrets are set for the --apply run, then unset, as when running history by
+    # hand where only the scheduler knows them.
+    monkeypatch.setenv("SECRET_RADARR_KEY", "radarr-key")
+    text = APPLY_CONFIG.replace("config-token", "${TMDB_API_TOKEN}").replace(
+        "api_key: radarr-key", "api_key: ${SECRET_RADARR_KEY}"
+    )
+    write_config(tmp_path / "config.yaml", text)
+    assert invoke(*MOVIE_SEARCH, "--apply", "--yes")[0] == 0
+
+    monkeypatch.delenv("TMDB_API_TOKEN")
+    monkeypatch.delenv("SECRET_RADARR_KEY")
+    status, out, err = invoke("history")
+    assert status == 0
+    assert out[0].startswith("#1  ")
+    assert err == ""
+
+    # Commands that contact TMDB still refuse.
+    status, _, err = invoke("run", "kids")
+    assert status == 2
+    assert "TMDB_API_TOKEN is not set" in err
 
 
 def test_history_unknown_run(fake_tmdb, fake_radarr, tmp_path):
