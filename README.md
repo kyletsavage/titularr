@@ -68,6 +68,7 @@ queries:
     radarr:            # this query's own add settings, replacing the radarr section's
       root_folder: /holiday   # (and sonarr: for series)
     max_adds: 10       # with --apply --yes: more titles than this, and none are added
+    scheduled: true    # included in `titularr run --scheduled` (default: false)
 ```
 
 Unknown keys are reported as errors, so typos don't go unnoticed.
@@ -99,6 +100,9 @@ uv run titularr run holiday-movies --apply
 # See what past --apply runs added, then the titles of run 3
 uv run titularr history
 uv run titularr history 3
+
+# Run every saved query that has `scheduled: true`, adding without asking
+uv run titularr run --scheduled --apply --yes
 ```
 
 **Every command is a preview** unless you add `--apply`, so a forgotten flag can never bulk-add your library. With `--apply`, Titularr shows the preview, then asks one question before adding the kept movies to Radarr and the kept series to Sonarr. `--yes` skips the question, for scripts. Without `--yes`, `--apply` refuses to run where nobody can answer. Because nobody reviews a `--yes` run, it has an add limit: if more than 10 titles would be added, none are, the run lists them and exits with an error. Set a saved query's own limit with `max_adds:`, or use `--max-adds` with `search`. Runs that ask first have no limit. Your quality profiles and root folders are checked against each app before searching. If one title fails to add, the rest are still added, and the failures are listed.
@@ -108,6 +112,8 @@ Sonarr adds series by their TVDB ID, so each series is looked up in Sonarr by it
 **Tags** (`tags: [anime]` in the `radarr:` or `sonarr:` section, or in a query's own block) are added to every title. In Radarr and Sonarr, a title's tags decide which release profiles (required and ignored words), indexers, download clients and delay profiles apply to it, so they change what gets grabbed. That's why each tag must already exist in the app. A missing one stops the run before searching and lists the app's tags, and Titularr never creates tags. The question before adding names the tags, and a query's tags replace the section's (`tags: []` means none for that query).
 
 **History.** Every `--apply` run is recorded in a SQLite file, `titularr.db` next to your config file unless `history:` names another path (relative paths are from the config file's folder). It holds each run's time and query, and each title's result: added, already there, not found, or failed (with why). Each result is saved as soon as it happens, so a run that's stopped halfway still shows what it did. Previews, and runs where you answer "no", aren't recorded. `titularr history` lists recent runs, and `titularr history <run>` lists one run's titles.
+
+**Running on a schedule.** Titularr doesn't stay running or keep its own timer. Instead, mark the saved queries you want with `scheduled: true`, and have a scheduler (cron, a systemd timer, Airflow) run `titularr run --scheduled --apply --yes`. That runs each scheduled query in the order they appear in the config, each under a `== name ==` heading and recorded as its own run in the history. If one query fails (a search error, a failed add, more titles than its `max_adds`), the rest still run. The run ends with a line like `Scheduled queries: 3 run, 1 failed`, and exits with status 1 if any failed, so the scheduler can flag it. Without `--apply`, it previews every scheduled query.
 
 ## A word of caution
 
@@ -129,7 +135,7 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [x] Adding series to Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs)
 - [x] Tags on added titles (existing tags only)
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
-- [ ] Saved queries and scheduling
+- [x] Saved queries, and `run --scheduled` for any scheduler (cron, Airflow)
 - [ ] Docker service with an HTTP API
 - [ ] Beyond-title search: collections, keywords, characters (e.g. every Batman movie)
 - [ ] Radarr/Sonarr lookup as a source
