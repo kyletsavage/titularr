@@ -327,7 +327,8 @@ def history(
     config: ConfigOption = None,
 ) -> None:
     """Show what past --apply runs added to Radarr and Sonarr."""
-    loaded = _load_config(config, required=True)
+    # Only reads the history file, so the TMDB/Radarr/Sonarr secrets needn't be set.
+    loaded = _load_config(config, required=True, need_secrets=False)
     assert loaded is not None
     path = loaded.history_path
     if not path.exists():
@@ -354,13 +355,15 @@ def history(
         _usage_error(str(e))
 
 
-def _load_config(explicit: Path | None, *, required: bool) -> Config | None:
+def _load_config(
+    explicit: Path | None, *, required: bool, need_secrets: bool = True
+) -> Config | None:
     """Load the config. If it isn't required, a missing default config file is fine."""
     path = resolve_config_path(explicit)
     if not required and explicit is None and not path.exists():
         return None
     try:
-        return load_config(path)
+        return load_config(path, need_secrets=need_secrets)
     except ConfigError as e:
         _usage_error(str(e))
 
@@ -508,9 +511,14 @@ def _target(kind: Kind, config: Config | None, query_name: str | None) -> _Targe
     if config is not None:
         add = config.radarr_add(query_name) if kind == "movie" else config.sonarr_add(query_name)
     if connection is None or add is None:
-        _usage_error(
-            f"--apply needs a usable {section} section in the config to add {_KIND_WORDS[kind][1]}"
-        )
+        titles = _KIND_WORDS[kind][1]
+        if config is not None and (reason := config.unusable_reason(section)):
+            # The section is in the file, but was left out (e.g. its API key isn't set).
+            _usage_error(
+                f"--apply needs a usable {section} section in the config to add {titles}"
+                f" ({section} can't be used: {reason})"
+            )
+        _usage_error(f"--apply needs a {section} section in the config to add {titles}")
     missing = [key for key in ("quality_profile", "root_folder") if not getattr(add, key)]
     if missing:
         needed = " and ".join(f"{section}.{key}" for key in missing)

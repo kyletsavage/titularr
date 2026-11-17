@@ -105,12 +105,20 @@ class Config(_Strict):
     # Problems that don't stop the config from loading (e.g. a radarr section that
     # can't be used). Set by load_config, not from the file.
     _warnings: tuple[str, ...] = PrivateAttr(default=())
+    # Why each radarr/sonarr section in the file can't be used, by app name (those
+    # sections are left out). Set by load_config.
+    _unusable: dict[str, str] = PrivateAttr(default_factory=dict)
     # The file this config was read from. Set by load_config.
     _path: Path = PrivateAttr(default=DEFAULT_CONFIG_PATH)
 
     @property
     def warnings(self) -> tuple[str, ...]:
         return self._warnings
+
+    def unusable_reason(self, app: str) -> str | None:
+        """Why the file's `app` section (radarr or sonarr) can't be used, or None if it
+        can, or the file has none."""
+        return self._unusable.get(app)
 
     @property
     def history_path(self) -> Path:
@@ -175,8 +183,11 @@ def resolve_config_path(explicit: Path | None = None) -> Path:
     return DEFAULT_CONFIG_PATH
 
 
-def load_config(path: Path) -> Config:
-    """Read, expand ${NAME} references in, and validate the config file at `path`."""
+def load_config(path: Path, *, need_secrets: bool = True) -> Config:
+    """Read, expand ${NAME} references in, and validate the config file at `path`.
+
+    With need_secrets=False, for commands that never contact TMDB, Radarr or Sonarr, an
+    unset variable isn't an error: its ${NAME} is left as it is."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -194,8 +205,10 @@ def load_config(path: Path) -> Config:
     # Radarr/Sonarr sections that are present but can't be used (missing settings or
     # unset variables) become warnings, so the rest of Titularr still works.
     warnings: list[str] = []
+    unusable: dict[str, str] = {}
     for app, kinds in _ARR_KINDS.items():
         if app in data and (problem := _unusable(data[app], _ARR_KEYS[app])):
+            unusable[app] = problem
             warnings.append(
                 f"{app} is in the config but can't be used ({problem}); "
                 f"{kinds} won't be checked against your library"
@@ -204,12 +217,13 @@ def load_config(path: Path) -> Config:
 
     # Expanded after parsing, so a value containing YAML-special characters (as a
     # secret might) can't change the file's structure.
-    data = _expand_env(data, path)
+    data = _expand_env(data, path, need_secrets)
     try:
         config = Config.model_validate(data)
     except ValidationError as e:
         raise ConfigError(f"{path} has invalid settings:\n{_describe(e)}") from e
     config._warnings = tuple(warnings)
+    config._unusable = unusable
     config._path = path
     return config
 
@@ -235,20 +249,22 @@ def _unusable(section: Any, keys: set[str]) -> str | None:
     return "; ".join(problems) or None
 
 
-def _expand_env(value: Any, path: Path) -> Any:
+def _expand_env(value: Any, path: Path, need_secrets: bool) -> Any:
     if isinstance(value, str):
 
         def replace(match: re.Match[str]) -> str:
             name = match.group(1)
-            if name not in os.environ:
+            if name in os.environ:
+                return os.environ[name]
+            if need_secrets:
                 raise ConfigError(f"{path} uses ${{{name}}}, but {name} is not set")
-            return os.environ[name]
+            return match.group(0)
 
         return _ENV_REFERENCE.sub(replace, value)
     if isinstance(value, dict):
-        return {key: _expand_env(item, path) for key, item in value.items()}
+        return {key: _expand_env(item, path, need_secrets) for key, item in value.items()}
     if isinstance(value, list):
-        return [_expand_env(item, path) for item in value]
+        return [_expand_env(item, path, need_secrets) for item in value]
     return value
 
 
