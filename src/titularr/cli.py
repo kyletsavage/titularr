@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
 
-import httpx2
 import typer
 from pydantic import ValidationError
 
+from titularr import service
 from titularr.arr import (
     AddResult,
     ArrError,
@@ -38,8 +38,8 @@ from titularr.exclusions import Exclusions
 from titularr.filters import Filters
 from titularr.history import History, HistoryError, RecordedTitle, Result, Run
 from titularr.models import AdultMode, Candidate, Decision, Kind
-from titularr.pipeline import Library, Query, Summary, run
-from titularr.sources.tmdb import TmdbClient, TmdbError
+from titularr.pipeline import Query
+from titularr.sources.tmdb import TmdbClient
 
 app = typer.Typer(
     help="Find every movie and series whose title matches your keywords, and add them to "
@@ -422,66 +422,58 @@ def _preview(
     if reconfigure is not None:
         reconfigure(errors="replace")
 
-    summary = Summary(kinds=query.kinds)
-    kept: list[Candidate] = []
-    # Handlers are attached for this run only (not the global root logger), so they
-    # always write to the current stderr and never pile up between runs.
+    def show(decision: Decision) -> None:
+        if decision.status == "kept" or show_dropped:
+            print(_describe_candidate(decision.candidate) + _why_dropped(decision))
+
+    # Attached for this run only (not the global root logger), so it always writes to
+    # the current stderr and never piles up between runs.
     console = logging.StreamHandler(sys.stderr)
     console.setLevel(logging.WARNING)
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    warnings = _WarningCounter()
     package_log = logging.getLogger("titularr")
     package_log.addHandler(console)
-    package_log.addHandler(warnings)
-    status = 0
-    library = Library()
     try:
-        # Fetched once, before searching, so a bad URL or API key fails fast.
-        library = _load_library(query, config)
-        for target in targets:
-            # Checked before searching too, so a wrong profile or folder fails fast.
-            target.prepare()
-        with TmdbClient(token) as tmdb:
-            for decision in run(query, tmdb, library):
-                summary.add(decision)
-                if decision.status == "kept":
-                    kept.append(decision.candidate)
-                if decision.status == "kept" or show_dropped:
-                    print(_describe_candidate(decision.candidate) + _why_dropped(decision))
+        with service.collect_warnings() as warnings:
+            # Fetched once, before searching, so a bad URL or API key fails fast.
+            library = service.load_library(query, config, radarr=RadarrClient, sonarr=SonarrClient)
+            for target in targets:
+                # Checked before searching too, so a wrong profile or folder fails fast.
+                target.prepare()
+            with TmdbClient(token) as tmdb:
+                result = service.search(query, tmdb, library, on_decision=show)
     except ArrError as e:
         # Before any TMDB request, so there's no summary to show.
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(1) from e
-    except (TmdbError, httpx2.HTTPError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        status = 1
     finally:
-        package_log.removeHandler(warnings)
         package_log.removeHandler(console)
+    if result.error is not None:
+        print(f"Error: {result.error}", file=sys.stderr)
 
     # Printed even after an error, so a partial run still shows how far it got.
     excludes = any(layer.active for _, layer in query.exclusion_layers())
     parts = []
-    for kind, counts in summary.counts.items():
+    for kind, counts in result.summary.counts.items():
         one, many = _KIND_WORDS[kind]
         part = f"{_plural(counts.found, one, many)} found, {counts.matched} matched"
         if excludes:
             part += f", {counts.excluded} excluded"
-        if query.filters.active or excludes or library.checks(kind):
+        if query.filters.active or excludes or result.library.checks(kind):
             part += f", {counts.kept} kept"
-        if library.checks(kind):
+        if result.library.checks(kind):
             part += f", {counts.in_library} in library"
         parts.append(part)
-    parts.append(_plural(warnings.count, "warning", "warnings"))
+    parts.append(_plural(len(warnings), "warning", "warnings"))
     print("; ".join(parts))
-    if status:
+    if result.error is not None:
         if apply:
             print("Nothing was added, because the search didn't finish.", file=sys.stderr)
-        raise typer.Exit(status)
+        raise typer.Exit(1)
     if apply:
         assert config is not None
         _apply(
-            kept,
+            result.kept,
             targets,
             yes,
             history_path=config.history_path,
@@ -666,47 +658,6 @@ def _describe_recorded(title: RecordedTitle) -> str:
 def _can_prompt() -> bool:
     """Whether someone can answer a question (stdin is a terminal, not a script or pipe)."""
     return sys.stdin.isatty()
-
-
-def _load_library(query: Query, config: Config | None) -> Library:
-    """What's already in Radarr/Sonarr, for the kinds this query searches."""
-    if config is None:
-        return Library()
-    log = logging.getLogger("titularr")
-    for warning in config.warnings:
-        # Only mention an app whose kind this query actually searches.
-        app_kind = "movie" if warning.startswith("radarr") else "series"
-        if app_kind in query.kinds:
-            log.warning(warning)
-
-    movie_ids = series_ids = None
-    if "movie" in query.kinds and config.radarr:
-        with RadarrClient(config.radarr.url, config.radarr.api_key) as radarr:
-            movie_ids = frozenset(radarr.library_tmdb_ids())
-    if "series" in query.kinds and config.sonarr:
-        with SonarrClient(config.sonarr.url, config.sonarr.api_key) as sonarr:
-            sonarr_library = sonarr.library()
-        series_ids = sonarr_library.tmdb_ids
-        if missing := sonarr_library.titles_without_tmdb_id:
-            shown = ", ".join(missing[:10])
-            more = f" and {len(missing) - 10} more" if len(missing) > 10 else ""
-            log.warning(
-                "%s in Sonarr %s no TMDB ID and can't be recognized in results: %s%s",
-                _plural(len(missing), "series", "series"),
-                "has" if len(missing) == 1 else "have",
-                shown,
-                more,
-            )
-    return Library(movie_ids=movie_ids, series_ids=series_ids)
-
-
-class _WarningCounter(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.count = 0
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.count += 1
 
 
 def _usage_error(message: str) -> NoReturn:
