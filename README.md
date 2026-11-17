@@ -6,7 +6,7 @@ Titularr is a companion tool for the *arr stack. You give it a word, phrase, or 
 
 Want every movie with "Christmas" in the title for a holiday collection? Every show with "Star Trek" in the name? Every film titled "Dracula" across a century of remakes? That's what Titularr is for.
 
-> **Status:** Early development. There is no working code yet. This README describes what the project is intended to do, and everything below is subject to change.
+> **Status:** Early development. The command-line tool works: it searches TMDB, previews what it would keep, and adds titles to Radarr and Sonarr with `--apply`. Commands and config may still change between versions. See the [roadmap](#roadmap) for what's planned.
 
 ---
 
@@ -47,6 +47,9 @@ sonarr:                # optional: skip series you already have, and add with --
   api_key: ${SONARR_API_KEY}
   quality_profile: HD-1080p   # needed for --apply; also: monitor, season_folder, series_type,
   root_folder: /tv            # monitor_new_items, search_on_add (default: off), tags
+
+history: titularr.db   # optional: where --apply runs are recorded (default: titularr.db
+                       # in the config file's folder)
 
 exclusions:            # never keep these, in any query ("global" exclusions)
   ids: [movie:1399]
@@ -91,6 +94,10 @@ uv run titularr run holiday-movies --show-dropped
 
 # Add the kept titles to Radarr and Sonarr, after a preview and a yes/no question
 uv run titularr run holiday-movies --apply
+
+# See what past --apply runs added, then the titles of run 3
+uv run titularr history
+uv run titularr history 3
 ```
 
 **Every command is a preview** unless you add `--apply`, so a forgotten flag can never bulk-add your library. With `--apply`, Titularr shows the preview, then asks one question before adding the kept movies to Radarr and the kept series to Sonarr. `--yes` skips the question, for scripts. Without `--yes`, `--apply` refuses to run where nobody can answer. Your quality profiles and root folders are checked against each app before searching. If one title fails to add, the rest are still added, and the failures are listed.
@@ -98,6 +105,8 @@ uv run titularr run holiday-movies --apply
 Sonarr adds series by their TVDB ID, so each series is looked up in Sonarr by its TMDB ID first. A series Sonarr can't find (usually one with no TVDB entry) is listed as `not found in Sonarr` and counted separately. It isn't an error, since running again won't change it.
 
 **Tags** (`tags: [anime]` in the `radarr:` or `sonarr:` section, or in a query's own block) are added to every title. In Radarr and Sonarr, a title's tags decide which release profiles (required and ignored words), indexers, download clients and delay profiles apply to it, so they change what gets grabbed. That's why each tag must already exist in the app. A missing one stops the run before searching and lists the app's tags, and Titularr never creates tags. The question before adding names the tags, and a query's tags replace the section's (`tags: []` means none for that query).
+
+**History.** Every `--apply` run is recorded in a SQLite file, `titularr.db` next to your config file unless `history:` names another path (relative paths are from the config file's folder). It holds each run's time and query, and each title's result: added, already there, not found, or failed (with why). Each result is saved as soon as it happens, so a run that's stopped halfway still shows what it did. Previews, and runs where you answer "no", aren't recorded. `titularr history` lists recent runs, and `titularr history <run>` lists one run's titles.
 
 ## A word of caution
 
@@ -114,7 +123,7 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [x] Exclusions per run (TMDB IDs, title patterns)
 - [x] Config file and preview output (`titularr search` / `run` / `validate`)
 - [x] Radarr and Sonarr library awareness (skip titles you already have, read-only)
-- [ ] Run history (SQLite)
+- [x] Run history (SQLite) and `titularr history`
 - [x] Adding movies to Radarr with `--apply`
 - [x] Adding series to Sonarr with `--apply` (including the TVDB ID lookup Sonarr needs)
 - [x] Tags on added titles (existing tags only)
