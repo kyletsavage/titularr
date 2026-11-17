@@ -67,6 +67,7 @@ queries:
       titles: [parody]
     radarr:            # this query's own add settings, replacing the radarr section's
       root_folder: /holiday   # (and sonarr: for series)
+    max_adds: 10       # with --apply --yes: more titles than this, and none are added
 ```
 
 Unknown keys are reported as errors, so typos don't go unnoticed.
@@ -100,7 +101,7 @@ uv run titularr history
 uv run titularr history 3
 ```
 
-**Every command is a preview** unless you add `--apply`, so a forgotten flag can never bulk-add your library. With `--apply`, Titularr shows the preview, then asks one question before adding the kept movies to Radarr and the kept series to Sonarr. `--yes` skips the question, for scripts. Without `--yes`, `--apply` refuses to run where nobody can answer. Your quality profiles and root folders are checked against each app before searching. If one title fails to add, the rest are still added, and the failures are listed.
+**Every command is a preview** unless you add `--apply`, so a forgotten flag can never bulk-add your library. With `--apply`, Titularr shows the preview, then asks one question before adding the kept movies to Radarr and the kept series to Sonarr. `--yes` skips the question, for scripts. Without `--yes`, `--apply` refuses to run where nobody can answer. Because nobody reviews a `--yes` run, it has an add limit: if more than 10 titles would be added, none are, the run lists them and exits with an error. Set a saved query's own limit with `max_adds:`, or use `--max-adds` with `search`. Runs that ask first have no limit. Your quality profiles and root folders are checked against each app before searching. If one title fails to add, the rest are still added, and the failures are listed.
 
 Sonarr adds series by their TVDB ID, so each series is looked up in Sonarr by its TMDB ID first. A series Sonarr can't find (usually one with no TVDB entry) is listed as `not found in Sonarr` and counted separately. It isn't an error, since running again won't change it.
 

@@ -1272,3 +1272,82 @@ def test_unusable_history_path_stops_before_searching(fake_tmdb, fake_radarr, tm
     assert status == 2
     assert "can't open run history" in err
     assert fake_tmdb == [] and out == [] and posted(requests) == []
+
+
+# --- add limit (max_adds) ---
+
+
+def test_apply_yes_adds_up_to_the_limit(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, _ = invoke(*MOVIE_SEARCH, "--apply", "--yes", "--max-adds", "2")
+
+    assert status == 0
+    assert out[-1] == "Radarr: 2 added, 0 already there, 0 failed"
+    assert len(posted(requests)) == 2
+
+
+def test_apply_yes_over_the_limit_adds_nothing(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, err = invoke(*MOVIE_SEARCH, "--apply", "--yes", "--max-adds", "1")
+
+    assert status == 1
+    assert (
+        "Not adding: 2 titles to add is more than --max-adds (1). "
+        "Preview the query, then narrow it or raise --max-adds." in err
+    )
+    # The titles that would have been added are still listed, for review.
+    assert out[:2] == [CHRISTMASTIME, ADULT]
+    assert posted(requests) == []
+    assert invoke("history")[1] == ["No runs recorded yet."]
+
+
+def test_limit_counts_movies_and_series_together(fake_tmdb, fake_radarr, fake_sonarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    radarr_requests, _ = fake_radarr
+    sonarr_requests, _, _ = fake_sonarr
+    status, _, err = invoke(*BOTH_SEARCH, "--apply", "--yes", "--max-adds", "2")
+
+    assert status == 1
+    assert "Not adding: 3 titles to add is more than --max-adds (2)." in err
+    assert posted(radarr_requests) == [] and posted(sonarr_requests) == []
+
+
+def test_limit_doesnt_apply_when_asking_first(fake_tmdb, fake_radarr, tmp_path, monkeypatch):
+    can_prompt(monkeypatch)
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    requests, _ = fake_radarr
+    status, out, _ = invoke(*MOVIE_SEARCH, "--apply", "--max-adds", "1", input="y\n")
+
+    assert status == 0
+    assert out[-1] == "Radarr: 2 added, 0 already there, 0 failed"
+    assert len(posted(requests)) == 2
+
+
+def test_saved_query_has_its_own_limit(fake_tmdb, fake_radarr, tmp_path):
+    config = APPLY_CONFIG.replace(
+        "      root_folder: /kids\n", "      root_folder: /kids\n    max_adds: 1\n"
+    )
+    write_config(tmp_path / "config.yaml", config)
+    requests, _ = fake_radarr
+    status, _, err = invoke("run", "kids", "--apply", "--yes")
+
+    assert status == 1
+    assert "Not adding: 2 titles to add is more than max_adds (1). " in err
+    assert "raise max_adds." in err
+    assert posted(requests) == []
+
+
+def test_max_adds_must_be_at_least_one(fake_tmdb, tmp_path):
+    config = APPLY_CONFIG.replace(
+        "      root_folder: /kids\n", "      root_folder: /kids\n    max_adds: 0\n"
+    )
+    write_config(tmp_path / "config.yaml", config)
+    status, _, err = invoke("validate")
+
+    assert status == 2
+    assert "queries.kids.max_adds" in err
+
+    status, _, _ = invoke(*MOVIE_SEARCH, "--max-adds", "0")
+    assert status == 2

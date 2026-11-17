@@ -26,7 +26,14 @@ from titularr.arr import (
     SonarrAddOptions,
     SonarrClient,
 )
-from titularr.config import ArrSettings, Config, ConfigError, load_config, resolve_config_path
+from titularr.config import (
+    DEFAULT_MAX_ADDS,
+    ArrSettings,
+    Config,
+    ConfigError,
+    load_config,
+    resolve_config_path,
+)
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
 from titularr.history import History, HistoryError, RecordedTitle, Result, Run
@@ -66,7 +73,13 @@ ApplyOption = Annotated[
         "is changed.",
     ),
 ]
-YesOption = Annotated[bool, typer.Option("--yes", help="With --apply: add without asking first.")]
+YesOption = Annotated[
+    bool,
+    typer.Option(
+        "--yes",
+        help="With --apply: add without asking first. More titles than the add limit adds none.",
+    ),
+]
 
 
 @app.command()
@@ -145,6 +158,13 @@ def search(
     show_dropped: ShowDroppedOption = False,
     apply: ApplyOption = False,
     yes: YesOption = False,
+    max_adds: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="With --apply --yes: if more titles than this would be added, add none.",
+        ),
+    ] = DEFAULT_MAX_ADDS,
 ) -> None:
     """Search TMDB once, with the rules given as options.
 
@@ -193,7 +213,15 @@ def search(
     token = loaded.sources.tmdb.token if loaded else os.environ.get("TMDB_API_TOKEN")
     if not token:
         _usage_error("set TMDB_API_TOKEN to your TMDB API Read Access Token, or use a config file")
-    _preview(query, token, show_dropped, loaded, apply=apply, yes=yes)
+    _preview(
+        query,
+        token,
+        show_dropped,
+        loaded,
+        apply=apply,
+        yes=yes,
+        max_adds=(max_adds, "--max-adds"),
+    )
 
 
 @app.command(name="run")
@@ -219,6 +247,7 @@ def run_saved(
         apply=apply,
         yes=yes,
         query_name=name,
+        max_adds=(loaded.queries[name].max_adds, "max_adds"),
     )
 
 
@@ -299,11 +328,13 @@ def _preview(
     apply: bool = False,
     yes: bool = False,
     query_name: str | None = None,
+    max_adds: tuple[int, str] = (DEFAULT_MAX_ADDS, "max_adds"),
 ) -> None:
     """Run the query, print the kept (and optionally dropped) titles, then a summary.
 
     With `apply`, then add the kept titles to Radarr and Sonarr (asking first, unless
     `yes`). `query_name` is the saved query being run, whose add settings apply.
+    `max_adds` is the add limit for `yes` runs, and the setting's name for messages.
     """
     targets: list[_Target] = []
     if apply:
@@ -382,7 +413,15 @@ def _preview(
         raise typer.Exit(status)
     if apply:
         assert config is not None
-        _apply(kept, targets, yes, history_path=config.history_path, query=query, name=query_name)
+        _apply(
+            kept,
+            targets,
+            yes,
+            history_path=config.history_path,
+            query=query,
+            name=query_name,
+            max_adds=max_adds,
+        )
 
 
 @dataclass
@@ -441,15 +480,31 @@ def _apply(
     history_path: Path,
     query: Query,
     name: str | None,
+    max_adds: tuple[int, str],
 ) -> None:
     """Add the kept titles, after asking unless `yes`. One line per title, then a
     summary per app. Each title's result is recorded in the run history; `name` is the
-    saved query's (None for a one-off search)."""
+    saved query's (None for a one-off search).
+
+    With `yes` nobody reviews the titles first, so if there are more than `max_adds`
+    (the limit, and the setting's name), none are added and the exit status is 1.
+    """
     batches = [(t, [c for c in kept if c.kind == t.kind]) for t in targets]
     batches = [(target, titles) for target, titles in batches if titles]
     if not batches:
         print("Nothing to add.")
         return
+
+    limit, setting = max_adds
+    total = sum(len(titles) for _, titles in batches)
+    if yes and total > limit:
+        # A run that asks first is reviewed by whoever answers, so it has no limit.
+        print(
+            f"Not adding: {_plural(total, 'title', 'titles')} to add is more than "
+            f"{setting} ({limit}). Preview the query, then narrow it or raise {setting}.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
 
     question = " and ".join(
         f"{_plural(len(titles), *_KIND_WORDS[target.kind])} to {target.app}"
