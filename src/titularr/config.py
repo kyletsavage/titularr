@@ -82,6 +82,8 @@ class SavedQuery(Query):
     sonarr: SonarrAdd | None = None
     # With --apply --yes nobody reviews the titles, so more than this adds none.
     max_adds: int = Field(default=DEFAULT_MAX_ADDS, ge=1)
+    # Included in `titularr run --scheduled`.
+    scheduled: bool = False
 
 
 # Which kind of title each app's library covers.

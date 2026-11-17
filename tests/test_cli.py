@@ -549,7 +549,7 @@ def test_validate_summarizes_a_valid_config(fake_tmdb, tmp_path):
     assert out == [
         (
             "config.yaml is valid: 1 saved query (christmas-movies), 1 global exclusion rule, "
-            "library check: none"
+            "library check: none, scheduled: none"
         )
     ]
     assert fake_tmdb == []  # never contacts TMDB
@@ -723,7 +723,10 @@ def test_validate_lists_library_checks_and_warnings(fake_arr, tmp_path, monkeypa
 
     assert status == 0
     assert out == [
-        "config.yaml is valid: 0 saved queries, 0 global exclusion rules, library check: Radarr"
+        (
+            "config.yaml is valid: 0 saved queries, 0 global exclusion rules, "
+            "library check: Radarr, scheduled: none"
+        )
     ]
     assert "WARNING: sonarr is in the config but can't be used" in err
     assert fake_arr == []  # validate never contacts the apps
@@ -1351,3 +1354,107 @@ def test_max_adds_must_be_at_least_one(fake_tmdb, tmp_path):
 
     status, _, _ = invoke(*MOVIE_SEARCH, "--max-adds", "0")
     assert status == 2
+
+
+# --- run --scheduled ---
+
+SCHEDULED_CONFIG = (
+    APPLY_CONFIG.replace("  kids:\n", "  kids:\n    scheduled: true\n").replace(
+        "  anime:\n", "  anime:\n    scheduled: true\n"
+    )
+    + "  not-scheduled:\n    text: christmas\n    kinds: [movie]\n"
+)
+
+
+def headers(out):
+    return [line for line in out if line.startswith("== ")]
+
+
+def test_scheduled_runs_only_scheduled_queries_in_order(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path
+):
+    write_config(tmp_path / "config.yaml", SCHEDULED_CONFIG)
+    status, out, _ = invoke("run", "--scheduled")
+
+    assert status == 0
+    assert headers(out) == ["== kids ==", "== anime =="]
+    assert out[-1] == "Scheduled queries: 2 run, 0 failed"
+    # A preview: nothing is added.
+    radarr_requests, _ = fake_radarr
+    sonarr_requests, _, _ = fake_sonarr
+    assert posted(radarr_requests) == [] and posted(sonarr_requests) == []
+
+
+def test_scheduled_apply_adds_and_records_each_query(fake_tmdb, fake_radarr, fake_sonarr, tmp_path):
+    write_config(tmp_path / "config.yaml", SCHEDULED_CONFIG)
+    status, out, _ = invoke("run", "--scheduled", "--apply", "--yes")
+
+    assert status == 0
+    assert "Radarr: 2 added, 0 already there, 0 failed" in out
+    assert "Sonarr: 1 added, 0 already there, 0 not found, 0 failed" in out
+    assert out[-1] == "Scheduled queries: 2 run, 0 failed"
+
+    _, history_out, _ = invoke("history")
+    assert [line.split("  ")[2] for line in history_out] == [
+        "run anime",
+        "run kids",
+    ]
+
+
+def test_one_failing_query_doesnt_stop_the_others(fake_tmdb, fake_radarr, fake_sonarr, tmp_path):
+    write_config(tmp_path / "config.yaml", SCHEDULED_CONFIG)
+    _, answers = fake_radarr
+    answers[2] = httpx2.Response(500, json={"message": "Database is locked"})
+    sonarr_requests, _, _ = fake_sonarr
+    status, out, _ = invoke("run", "--scheduled", "--apply", "--yes")
+
+    assert status == 1
+    assert "Radarr: 1 added, 0 already there, 1 failed" in out
+    assert len(posted(sonarr_requests)) == 1  # anime still ran after kids failed
+    assert out[-1] == "Scheduled queries: 2 run, 1 failed"
+
+
+def test_too_many_to_add_counts_as_failed(fake_tmdb, fake_radarr, fake_sonarr, tmp_path):
+    config = SCHEDULED_CONFIG.replace("  kids:\n", "  kids:\n    max_adds: 1\n")
+    write_config(tmp_path / "config.yaml", config)
+    status, out, err = invoke("run", "--scheduled", "--apply", "--yes")
+
+    assert status == 1
+    assert "more than max_adds (1)" in err
+    assert out[-1] == "Scheduled queries: 2 run, 1 failed"
+
+
+@pytest.mark.parametrize("args", [("run",), ("run", "kids", "--scheduled")])
+def test_run_needs_a_name_or_scheduled(fake_tmdb, tmp_path, args):
+    write_config(tmp_path / "config.yaml", SCHEDULED_CONFIG)
+    status, _, err = invoke(*args)
+
+    assert status == 2
+    assert "give the name of a saved query, or --scheduled (not both)" in err
+    assert fake_tmdb == []
+
+
+def test_no_scheduled_queries(fake_tmdb, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    status, out, _ = invoke("run", "--scheduled", "--apply", "--yes")
+
+    assert status == 0
+    assert out == ["No saved queries have scheduled: true."]
+    assert fake_tmdb == []
+
+
+def test_scheduled_apply_without_yes_needs_someone_to_answer(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", SCHEDULED_CONFIG)
+    status, out, err = invoke("run", "--scheduled", "--apply")
+
+    assert status == 2
+    assert err.count("nobody can answer here; add --yes") == 1
+    assert out == [] and fake_tmdb == []
+
+
+def test_validate_lists_scheduled_queries(tmp_path):
+    write_config(tmp_path / "config.yaml", SCHEDULED_CONFIG)
+    status, out, _ = invoke("validate")
+
+    assert status == 0
+    assert out[0].endswith("library check: Radarr, Sonarr, scheduled: kids, anime")

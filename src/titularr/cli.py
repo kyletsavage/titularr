@@ -226,28 +226,72 @@ def search(
 
 @app.command(name="run")
 def run_saved(
-    name: Annotated[str, typer.Argument(help="Name of a query saved in the config file.")],
+    name: Annotated[
+        str | None,
+        typer.Argument(
+            help="Name of a query saved in the config file. Leave out with --scheduled.",
+            show_default=False,
+        ),
+    ] = None,
+    scheduled: Annotated[
+        bool,
+        typer.Option(
+            "--scheduled",
+            help="Run every saved query that has 'scheduled: true', one after another.",
+        ),
+    ] = False,
     config: ConfigOption = None,
     show_dropped: ShowDroppedOption = False,
     apply: ApplyOption = False,
     yes: YesOption = False,
 ) -> None:
-    """Run a query saved in the config file."""
+    """Run a query saved in the config file, or every scheduled one."""
+    if (name is None) == (not scheduled):
+        _usage_error("give the name of a saved query, or --scheduled (not both)")
     loaded = _load_config(config, required=True)
     assert loaded is not None
-    try:
-        query = loaded.query(name)
-    except ConfigError as e:
-        _usage_error(str(e))
+    if name is not None:
+        try:
+            loaded.query(name)  # an unknown name lists the saved ones
+        except ConfigError as e:
+            _usage_error(str(e))
+        _run_saved_query(loaded, name, show_dropped, apply=apply, yes=yes)
+        return
+
+    names = [n for n, saved in loaded.queries.items() if saved.scheduled]
+    if not names:
+        print("No saved queries have scheduled: true.")
+        return
+    # Checked once here, rather than failing the same way for every query.
+    if apply and not yes and not _can_prompt():
+        _usage_error("--apply asks before adding, but nobody can answer here; add --yes")
+    failed = 0
+    for n in names:
+        print(f"== {n} ==")
+        try:
+            _run_saved_query(loaded, n, show_dropped, apply=apply, yes=yes)
+        except typer.Exit as e:
+            # One query failing (a search error, a failed add, too many titles to add,
+            # a missing setting) doesn't stop the others.
+            if e.exit_code:
+                failed += 1
+    print(f"Scheduled queries: {len(names)} run, {failed} failed")
+    if failed:
+        raise typer.Exit(1)
+
+
+def _run_saved_query(
+    config: Config, name: str, show_dropped: bool, *, apply: bool, yes: bool
+) -> None:
     _preview(
-        query,
-        loaded.sources.tmdb.token,
+        config.query(name),
+        config.sources.tmdb.token,
         show_dropped,
-        loaded,
+        config,
         apply=apply,
         yes=yes,
         query_name=name,
-        max_adds=(loaded.queries[name].max_adds, "max_adds"),
+        max_adds=(config.queries[name].max_adds, "max_adds"),
     )
 
 
@@ -264,10 +308,12 @@ def validate(config: ConfigOption = None) -> None:
     rules += len(loaded.exclusions.regexes)
     listed = f" ({', '.join(names)})" if names else ""
     apps = [name for name, s in (("Radarr", loaded.radarr), ("Sonarr", loaded.sonarr)) if s]
+    scheduled = [name for name, saved in loaded.queries.items() if saved.scheduled]
     print(
         f"{path} is valid: {_plural(len(names), 'saved query', 'saved queries')}{listed}, "
         f"{_plural(rules, 'global exclusion rule', 'global exclusion rules')}, "
-        f"library check: {', '.join(apps) or 'none'}"
+        f"library check: {', '.join(apps) or 'none'}, "
+        f"scheduled: {', '.join(scheduled) or 'none'}"
     )
 
 
