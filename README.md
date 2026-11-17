@@ -63,6 +63,7 @@ queries:
     filters:
       year_min: 1940
       min_votes: 500   # also: year_max, min_rating, languages (default: English), keep_unknown
+      runtime_min: 80  # minutes (also runtime_max); movies only, one TMDB request per title
     exclusions:        # this query's own, checked after the global list
       titles: [parody]
     radarr:            # this query's own add settings, replacing the radarr section's
@@ -126,7 +127,7 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [x] TMDB series search
 - [x] Title matching (substring, word, regex)
 - [x] Filters (year, language, rating, votes)
-- [ ] Runtime filter (needs a lookup per title)
+- [x] Runtime filter (movies; a lookup per title)
 - [x] Exclusions per run (TMDB IDs, title patterns)
 - [x] Config file and preview output (`titularr search` / `run` / `validate`)
 - [x] Radarr and Sonarr library awareness (skip titles you already have, read-only)

@@ -1,11 +1,12 @@
 """The pipeline: search a source, then decide what to keep and why.
 
 For every candidate a source returns, the decision is made in a fixed order:
-match the title, then check exclusions, then filters. Interfaces (the CLI now, an API
+match the title, then check exclusions, then filters, then the library, then (only if
+a runtime filter is set) the runtime, which costs a lookup per title. Interfaces (the CLI now, an API
 and web UI later) build a `Query`, call `run`, and present the decisions.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Protocol, Self
 
@@ -23,6 +24,12 @@ class TitleSource(Protocol):
     def search_movies(self, query: str, *, adult: AdultMode = "exclude") -> Iterator[Candidate]: ...
 
     def search_series(self, query: str, *, adult: AdultMode = "exclude") -> Iterator[Candidate]: ...
+
+    def movie_runtime(self, tmdb_id: int) -> int | None: ...
+
+
+RuntimeLookup = Callable[[int], int | None]
+"""A movie's runtime in minutes by TMDB ID (None or 0 if unknown)."""
 
 
 class Query(BaseModel):
@@ -70,6 +77,8 @@ class Query(BaseModel):
             raise ValueError('a pattern is only used when match is "regex"')
         value = self.pattern if self.match == "regex" else self.text
         self._matcher = TitleMatcher(self.match, value)  # raises for an invalid regex
+        if self.filters.needs_runtime and "series" in self.kinds:
+            raise ValueError("runtime filters work for movies only; set kinds to movie")
         return self
 
     def matches(self, candidate: Candidate) -> bool:
@@ -104,11 +113,18 @@ class Library:
         return ids is not None and candidate.tmdb_id in ids
 
 
-def decide(query: Query, candidate: Candidate, library: Library | None = None) -> Decision:
-    """Match, then exclusions, then filters, then the library check.
+def decide(
+    query: Query,
+    candidate: Candidate,
+    library: Library | None = None,
+    runtime: RuntimeLookup | None = None,
+) -> Decision:
+    """Match, then exclusions, then filters, then the library check, then the runtime.
 
     An excluded title isn't filtered, and only titles that would otherwise be kept are
-    checked against the library: "kept" means it would be added.
+    checked against the library: "kept" means it would be added. The runtime is looked
+    up last, so only titles that would be added cost a request; `runtime` is required
+    when the query has a runtime filter.
     """
     if not query.matches(candidate):
         return Decision(candidate=candidate, status="no_match")
@@ -119,15 +135,21 @@ def decide(query: Query, candidate: Candidate, library: Library | None = None) -
         return Decision(candidate=candidate, status="filtered", reasons=tuple(reasons))
     if library is not None and library.has(candidate):
         return Decision(candidate=candidate, status="in_library")
+    if query.filters.needs_runtime:
+        if runtime is None:
+            raise ValueError("this query has a runtime filter, so a runtime lookup is needed")
+        if reasons := query.filters.runtime_reasons(runtime(candidate.tmdb_id)):
+            return Decision(candidate=candidate, status="filtered", reasons=tuple(reasons))
     return Decision(candidate=candidate, status="kept")
 
 
 def run(query: Query, source: TitleSource, library: Library | None = None) -> Iterator[Decision]:
     """Search for each kind in turn and yield a decision per candidate as it arrives."""
+    runtime = source.movie_runtime if query.filters.needs_runtime else None
     for kind in query.kinds:
         search = source.search_movies if kind == "movie" else source.search_series
         for candidate in search(query.text, adult=query.adult):
-            yield decide(query, candidate, library)
+            yield decide(query, candidate, library, runtime)
 
 
 @dataclass
