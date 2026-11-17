@@ -1169,3 +1169,106 @@ def test_missing_tag_stops_before_searching(fake_tmdb, fake_radarr, fake_sonarr,
     assert "Sonarr has no tag named 'dubbed' (it has: anime)" in err
     assert fake_tmdb == [] and out == []
     assert all(r.method == "GET" for r in sonarr_requests)  # no tag was created
+
+
+# --- run history ---
+
+
+def test_apply_records_each_title_and_history_lists_it(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path
+):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    _, _, answers = fake_sonarr
+    answers[10] = httpx2.Response(500, json={"message": "Database is locked"})
+    invoke(*BOTH_SEARCH, "--apply", "--yes")
+
+    assert (tmp_path / "titularr.db").exists()
+    status, out, _ = invoke("history")
+    assert status == 0
+    (line,) = out
+    assert line.startswith("#1  ")
+    assert line.endswith(
+        '  search "christmas"  Radarr: 2 added, 0 already there, 0 failed; '
+        "Sonarr: 0 added, 0 already there, 0 not found, 1 failed"
+    )
+
+    status, out, _ = invoke("history", "1")
+    assert status == 0
+    assert out[1:] == [
+        "added: [movie] Christmastime (2012)  tmdb:2",
+        "added: [movie] Adult Christmas (2010)  tmdb:4",
+        (
+            "failed: [series] Christmas Wars (2022)  tmdb:10: "
+            "Sonarr returned HTTP 500: Database is locked"
+        ),
+    ]
+
+
+def test_history_names_the_saved_query_and_lists_newest_first(
+    fake_tmdb, fake_radarr, fake_sonarr, tmp_path
+):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    invoke("run", "kids", "--apply", "--yes")
+    invoke("run", "anime", "--apply", "--yes")
+
+    status, out, _ = invoke("history")
+    assert status == 0
+    assert [line.split("  ")[0] for line in out] == ["#2", "#1"]
+    assert "  run anime  Sonarr: 1 added" in out[0]
+    assert "  run kids  Radarr: 2 added" in out[1]
+
+    status, out, _ = invoke("history", "--limit", "1")
+    assert [line.split("  ")[0] for line in out] == ["#2"]
+
+
+def test_declining_or_previewing_records_nothing(fake_tmdb, fake_radarr, tmp_path, monkeypatch):
+    can_prompt(monkeypatch)
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    invoke(*MOVIE_SEARCH)
+    invoke(*MOVIE_SEARCH, "--apply", input="n\n")
+    invoke("search", "story", "--kind", "movie", "--apply", "--yes")  # nothing to add
+
+    status, out, _ = invoke("history")
+    assert status == 0
+    assert out == ["No runs recorded yet."]
+
+
+def test_history_without_any_runs(tmp_path):
+    write_config(tmp_path / "config.yaml")
+    status, out, _ = invoke("history")
+
+    assert status == 0
+    assert out == ["No runs recorded yet."]
+    assert not (tmp_path / "titularr.db").exists()  # looking doesn't create the file
+
+
+def test_history_unknown_run(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG)
+    invoke(*MOVIE_SEARCH, "--apply", "--yes")
+    status, _, err = invoke("history", "9")
+
+    assert status == 2
+    assert "no run #9 in the run history" in err
+
+
+def test_history_path_is_relative_to_the_config_folder(fake_tmdb, fake_radarr, tmp_path):
+    folder = tmp_path / "conf"
+    (folder / "data").mkdir(parents=True)
+    config = write_config(folder / "titularr.yaml", APPLY_CONFIG + "history: data/runs.db\n")
+    status, _, _ = invoke(*MOVIE_SEARCH, "--config", str(config), "--apply", "--yes")
+
+    assert status == 0
+    assert (folder / "data" / "runs.db").exists()
+    assert not (tmp_path / "titularr.db").exists()
+    status, out, _ = invoke("history", "--config", str(config))
+    assert out[0].startswith("#1  ")
+
+
+def test_unusable_history_path_stops_before_searching(fake_tmdb, fake_radarr, tmp_path):
+    write_config(tmp_path / "config.yaml", APPLY_CONFIG + "history: missing/runs.db\n")
+    requests, _ = fake_radarr
+    status, out, err = invoke(*MOVIE_SEARCH, "--apply", "--yes")
+
+    assert status == 2
+    assert "can't open run history" in err
+    assert fake_tmdb == [] and out == [] and posted(requests) == []

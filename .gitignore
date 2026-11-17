@@ -221,3 +221,5 @@ __marimo__/
 
 # Titularr: real configs hold your settings; only config.example.yaml is committed
 /config.yaml
+# Titularr's run history, next to config.yaml by default
+/titularr.db

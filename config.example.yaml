@@ -38,6 +38,10 @@ sources:
 # clients apply to a title, so they must already exist in the app: a missing one is an
 # error, never created. A query's own tags replace these ones.
 
+# Where --apply runs are recorded (see them with: titularr history). Default: titularr.db
+# in this file's folder. Relative paths are from this file's folder.
+# history: titularr.db
+
 # Never keep these titles, in any query. Checked alongside each query's own exclusions;
 # excluded titles say which list excluded them ("global:" or "query:").
 exclusions:

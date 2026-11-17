@@ -26,6 +26,8 @@ from titularr.pipeline import Query
 
 CONFIG_ENV_VAR = "TITULARR_CONFIG"
 DEFAULT_CONFIG_PATH = Path("config.yaml")
+# The run history file, in the config file's folder unless `history:` says otherwise.
+DEFAULT_HISTORY_FILE = "titularr.db"
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _QUERY_NAME = re.compile(r"[A-Za-z0-9_-]+")
@@ -91,14 +93,24 @@ class Config(_Strict):
     # Applies to every query, as a separate "global" layer next to the query's own.
     exclusions: Exclusions = Exclusions()
     queries: dict[str, SavedQuery] = {}
+    # Where --apply runs are recorded. Relative paths are from the config file's folder.
+    history: str | None = Field(default=None, min_length=1)
 
     # Problems that don't stop the config from loading (e.g. a radarr section that
     # can't be used). Set by load_config, not from the file.
     _warnings: tuple[str, ...] = PrivateAttr(default=())
+    # The file this config was read from. Set by load_config.
+    _path: Path = PrivateAttr(default=DEFAULT_CONFIG_PATH)
 
     @property
     def warnings(self) -> tuple[str, ...]:
         return self._warnings
+
+    @property
+    def history_path(self) -> Path:
+        """The run history file: `history:`, or titularr.db, beside the config file
+        unless it's an absolute path."""
+        return self._path.parent / (self.history or DEFAULT_HISTORY_FILE)
 
     @field_validator("queries")
     @classmethod
@@ -192,6 +204,7 @@ def load_config(path: Path) -> Config:
     except ValidationError as e:
         raise ConfigError(f"{path} has invalid settings:\n{_describe(e)}") from e
     config._warnings = tuple(warnings)
+    config._path = path
     return config
 
 

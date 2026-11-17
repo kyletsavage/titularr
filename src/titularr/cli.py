@@ -7,6 +7,7 @@ Radarr and the kept series to Sonarr, after asking first (--yes skips asking).
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
@@ -28,6 +29,7 @@ from titularr.arr import (
 from titularr.config import ArrSettings, Config, ConfigError, load_config, resolve_config_path
 from titularr.exclusions import Exclusions
 from titularr.filters import Filters
+from titularr.history import History, HistoryError, RecordedTitle, Result, Run
 from titularr.models import AdultMode, Candidate, Decision, Kind
 from titularr.pipeline import Library, Query, Summary, run
 from titularr.sources.tmdb import TmdbClient, TmdbError
@@ -240,6 +242,43 @@ def validate(config: ConfigOption = None) -> None:
     )
 
 
+@app.command()
+def history(
+    run_id: Annotated[
+        int | None,
+        typer.Argument(help="Show the titles of this run. Default: list recent runs."),
+    ] = None,
+    limit: Annotated[int, typer.Option(min=1, help="How many recent runs to list.")] = 20,
+    config: ConfigOption = None,
+) -> None:
+    """Show what past --apply runs added to Radarr and Sonarr."""
+    loaded = _load_config(config, required=True)
+    assert loaded is not None
+    path = loaded.history_path
+    if not path.exists():
+        print("No runs recorded yet.")
+        return
+    try:
+        with History.open(path) as recorded:
+            if run_id is None:
+                runs = recorded.recent_runs(limit)
+                if not runs:
+                    print("No runs recorded yet.")
+                for run_ in runs:
+                    print(_describe_run(run_))
+                return
+            run_ = recorded.get_run(run_id)
+            if run_ is None:
+                _usage_error(f"no run #{run_id} in the run history")
+            print(_describe_run(run_))
+            for title in recorded.run_titles(run_id):
+                print(
+                    _result_line(title.kind, title.result, _describe_recorded(title), title.error)
+                )
+    except HistoryError as e:
+        _usage_error(str(e))
+
+
 def _load_config(explicit: Path | None, *, required: bool) -> Config | None:
     """Load the config. If it isn't required, a missing default config file is fine."""
     path = resolve_config_path(explicit)
@@ -271,6 +310,13 @@ def _preview(
         if not yes and not _can_prompt():
             _usage_error("--apply asks before adding, but nobody can answer here; add --yes")
         targets = [_target(kind, config, query_name) for kind in query.kinds]
+        # Checked before searching too, so nothing is ever added without a record.
+        # (Any --apply has a config: _target needs one.)
+        assert config is not None
+        try:
+            History.open(config.history_path).close()
+        except HistoryError as e:
+            _usage_error(str(e))
 
     # Titles can contain characters the terminal's encoding can't show (e.g. a Windows
     # console redirected to a file); replace them instead of crashing.
@@ -335,7 +381,8 @@ def _preview(
             print("Nothing was added, because the search didn't finish.", file=sys.stderr)
         raise typer.Exit(status)
     if apply:
-        _apply(kept, targets, yes)
+        assert config is not None
+        _apply(kept, targets, yes, history_path=config.history_path, query=query, name=query_name)
 
 
 @dataclass
@@ -350,7 +397,7 @@ class _Target:
 
     @property
     def app(self) -> str:
-        return "Radarr" if self.kind == "movie" else "Sonarr"
+        return _app_name(self.kind)
 
     def client(self) -> RadarrClient | SonarrClient:
         client = RadarrClient if self.kind == "movie" else SonarrClient
@@ -386,9 +433,18 @@ def _target(kind: Kind, config: Config | None, query_name: str | None) -> _Targe
     return _Target(kind, connection, add)
 
 
-def _apply(kept: list[Candidate], targets: list[_Target], yes: bool) -> None:
+def _apply(
+    kept: list[Candidate],
+    targets: list[_Target],
+    yes: bool,
+    *,
+    history_path: Path,
+    query: Query,
+    name: str | None,
+) -> None:
     """Add the kept titles, after asking unless `yes`. One line per title, then a
-    summary per app."""
+    summary per app. Each title's result is recorded in the run history; `name` is the
+    saved query's (None for a one-off search)."""
     batches = [(t, [c for c in kept if c.kind == t.kind]) for t in targets]
     batches = [(target, titles) for target, titles in batches if titles]
     if not batches:
@@ -407,35 +463,77 @@ def _apply(kept: list[Candidate], targets: list[_Target], yes: bool) -> None:
 
     summaries = []
     any_failed = False
-    for target, titles in batches:
-        counts = dict.fromkeys(("added", "exists", "not_found", "failed"), 0)
-        with target.client() as client:
-            for title in titles:
-                described = _describe_candidate(title)
-                try:
-                    result = target.add_one(client, title.tmdb_id)
-                except ArrError as e:
-                    # One title failing doesn't stop the rest.
-                    counts["failed"] += 1
-                    print(f"failed: {described}: {e}")
-                    continue
-                counts[result] += 1
-                if result == "added":
-                    print(f"added: {described}")
-                elif result == "exists":
-                    print(f"already in {target.app}: {described}")
-                else:
-                    print(f"not found in {target.app}: {described}")
-        summary = f"{target.app}: {counts['added']} added, {counts['exists']} already there"
-        # Only Sonarr can fail to find a title (a series it has no TVDB entry for).
-        if target.kind == "series":
-            summary += f", {counts['not_found']} not found"
-        summaries.append(summary + f", {counts['failed']} failed")
-        any_failed = any_failed or counts["failed"] > 0
+    try:
+        recorded = History.open(history_path)
+    except HistoryError as e:
+        # Checked before searching, so this only happens if the file changed since.
+        print(f"Error: {e}; nothing was added", file=sys.stderr)
+        raise typer.Exit(1) from e
+    with recorded:
+        run_id = recorded.start_run("run" if name is not None else "search", query.text, name)
+        for target, titles in batches:
+            counts: dict[Result, int] = dict.fromkeys(("added", "exists", "not_found", "failed"), 0)
+            with target.client() as client:
+                for title in titles:
+                    error = None
+                    try:
+                        result: Result = target.add_one(client, title.tmdb_id)
+                    except ArrError as e:
+                        # One title failing doesn't stop the rest.
+                        result, error = "failed", str(e)
+                    recorded.record(run_id, title, result, error)
+                    counts[result] += 1
+                    print(_result_line(title.kind, result, _describe_candidate(title), error))
+            summaries.append(_app_summary(target.kind, counts))
+            any_failed = any_failed or counts["failed"] > 0
+        recorded.finish_run(run_id)
     for summary in summaries:
         print(summary)
     if any_failed:
         raise typer.Exit(1)
+
+
+def _app_name(kind: Kind) -> str:
+    return "Radarr" if kind == "movie" else "Sonarr"
+
+
+def _result_line(kind: Kind, result: Result, described: str, error: str | None) -> str:
+    """One title's result, as --apply prints it and `history` shows it."""
+    if result == "added":
+        return f"added: {described}"
+    if result == "exists":
+        return f"already in {_app_name(kind)}: {described}"
+    if result == "not_found":
+        return f"not found in {_app_name(kind)}: {described}"
+    return f"failed: {described}: {error}"
+
+
+def _app_summary(kind: Kind, counts: Mapping[Result, int]) -> str:
+    """How many titles one app got with each result, e.g. "Radarr: 2 added, ..."."""
+    summary = f"{_app_name(kind)}: {counts.get('added', 0)} added, "
+    summary += f"{counts.get('exists', 0)} already there"
+    # Only Sonarr can fail to find a title (a series it has no TVDB entry for).
+    if kind == "series":
+        summary += f", {counts.get('not_found', 0)} not found"
+    return summary + f", {counts.get('failed', 0)} failed"
+
+
+def _describe_run(run_: Run) -> str:
+    """One line per recorded run: when, which query, and what each app got."""
+    started = run_.started_at.astimezone().strftime("%Y-%m-%d %H:%M")
+    what = f"run {run_.query_name}" if run_.query_name else f'search "{run_.query_text}"'
+    kinds: list[Kind] = [k for k in ("movie", "series") if any(k == c[0] for c in run_.counts)]
+    results = "; ".join(
+        _app_summary(kind, {r: n for (k, r), n in run_.counts.items() if k == kind})
+        for kind in kinds
+    )
+    unfinished = "  (stopped before finishing)" if run_.finished_at is None else ""
+    return f"#{run_.id}  {started}  {what}  {results}{unfinished}"
+
+
+def _describe_recorded(title: RecordedTitle) -> str:
+    year = "?" if title.year is None else title.year
+    return f"[{title.kind}] {title.title} ({year})  tmdb:{title.tmdb_id}"
 
 
 def _can_prompt() -> bool:
