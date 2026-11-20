@@ -38,6 +38,9 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
+          # GitHub reports the license as GPL-3.0; pyproject says "or later".
+          labels: |
+            org.opencontainers.image.licenses=GPL-3.0-or-later
 
       - name: Build (and push, on main)
         uses: docker/build-push-action@v7

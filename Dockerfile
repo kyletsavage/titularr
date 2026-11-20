@@ -49,9 +49,10 @@ EXPOSE 8778
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8778/api/health', timeout=4)"]
 
-LABEL org.opencontainers.image.source="https://github.com/kyletsavage/titularr" \
-      org.opencontainers.image.description="Titularr's read-only HTTP API and CLI" \
-      org.opencontainers.image.licenses="GPL-3.0-or-later"
+# Links the GHCR package to the repository. The workflow's metadata-action sets the
+# other labels (title, description, license, revision); a plain `docker build` gets
+# only this one.
+LABEL org.opencontainers.image.source="https://github.com/kyletsavage/titularr"
 
 ENTRYPOINT ["titularr"]
 CMD ["serve", "--host", "0.0.0.0"]
