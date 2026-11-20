@@ -1,0 +1,14 @@
+# Only pyproject.toml, uv.lock, README.md, LICENSE and src/ are needed to build.
+.git
+.github
+.claude
+.venv
+**/__pycache__
+.pytest_cache
+.ruff_cache
+tests
+
+# Local secrets and run history: never baked into an image.
+config.yaml
+*.db
+.env

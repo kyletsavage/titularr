@@ -137,6 +137,40 @@ uv run titularr serve --host 0.0.0.0     # reachable from other machines too
 
 Interactive docs are at `/docs`: click **Authorize**, enter the key, and try each route. The config file is read on each request, so edits show up without a restart (it's also checked when `serve` starts). If TMDB fails part-way through a preview, the response still has what was found so far, with `error` saying what went wrong. If Radarr or Sonarr can't be reached, the preview fails with status 502.
 
+### Running the API in Docker
+
+Each push to `main` publishes an image to `ghcr.io/kyletsavage/titularr`, tagged `latest` and `sha-<commit>` (pin a `sha-` tag to stay on, or go back to, one build). The image is amd64 only, and the package is private. To pull it, log in once on the server with a GitHub personal access token (classic) that has only the `read:packages` scope. GHCR doesn't accept fine-grained tokens.
+
+```bash
+docker login ghcr.io -u <your-github-username>   # paste the token as the password
+```
+
+A `compose.yaml`, with a `.env` file next to it holding `TITULARR_API_KEY` and whatever variables your config uses (here `TMDB_API_TOKEN`, `RADARR_API_KEY` and `SONARR_API_KEY`):
+
+```yaml
+services:
+  titularr:
+    image: ghcr.io/kyletsavage/titularr:latest
+    restart: unless-stopped
+    ports:
+      - "8778:8778"
+    env_file: .env
+    volumes:
+      - ./config:/config:ro   # config.yaml, and titularr.db (the run history) if you have one
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # if your config reaches Radarr/Sonarr on the host this way
+```
+
+```bash
+docker compose up -d     # start; `docker compose ps` shows it as healthy once the API answers
+docker compose pull && docker compose up -d   # update to the newest image
+```
+
+Some details:
+- **The container runs as uid 1000**, so it must be able to read the mounted files. Use `user:` in the compose file if your files belong to another user.
+- **The read-only mount is enough** for the API, since it only reads the config and the history.
+- **The image includes the whole CLI.** For example, `docker compose run --rm titularr validate` checks the mounted config.
+
 ## A word of caution
 
 Broad keywords can match a *lot* of titles. Review the preview first, use filters and exclusions to keep results relevant, and leave `search_on_add` off (the default) until you've reviewed what landed in Radarr and Sonarr. Your indexers and your disks will thank you.
@@ -159,7 +193,7 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
 - [x] Saved queries, and `run --scheduled` for any scheduler (cron, Airflow)
 - [x] Read-only HTTP API (`titularr serve`)
-- [ ] Docker image for running the API as a service
+- [x] Docker image for running the API as a service (published to GHCR)
 - [ ] Beyond-title search: collections, keywords, characters (e.g. every Batman movie)
 - [ ] Radarr/Sonarr lookup as a source
 - [ ] Optional web UI (including manual review and an exclusion blacklist)
