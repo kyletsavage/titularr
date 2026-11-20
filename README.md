@@ -116,6 +116,27 @@ Sonarr adds series by their TVDB ID, so each series is looked up in Sonarr by it
 
 **Running on a schedule.** Titularr doesn't stay running or keep its own timer. Instead, mark the saved queries you want with `scheduled: true`, and have a scheduler (cron, a systemd timer, Airflow) run `titularr run --scheduled --apply --yes`. That runs each scheduled query in the order they appear in the config, each under a `== name ==` heading and recorded as its own run in the history. If one query fails (a search error, a failed add, more titles than its `max_adds`), the rest still run. The run ends with a line like `Scheduled queries: 3 run, 1 failed`, and exits with status 1 if any failed, so the scheduler can flag it. Without `--apply`, it previews every scheduled query.
 
+## HTTP API
+
+`titularr serve` starts a read-only HTTP API: list the saved queries, preview one, and read the run history, without a terminal. Nothing it does changes Radarr or Sonarr; adding still happens with `--apply` (or your scheduler).
+
+```bash
+# Clients must send this key in the X-Api-Key header; serve won't start without it
+export TITULARR_API_KEY=pick-a-long-random-string
+uv run titularr serve                    # http://127.0.0.1:8778
+uv run titularr serve --host 0.0.0.0     # reachable from other machines too
+```
+
+| Route | What it returns |
+| --- | --- |
+| `GET /api/health` | `{"status": "ok"}`; needs no key |
+| `GET /api/queries` | The saved queries and their settings |
+| `GET /api/queries/{name}/preview` | Every title found, kept or dropped with the reasons, plus counts and warnings |
+| `GET /api/history?limit=20` | Recent `--apply` runs, newest first |
+| `GET /api/history/{run_id}` | One run and what it did with each title |
+
+Interactive docs are at `/docs`: click **Authorize**, enter the key, and try each route. The config file is read on each request, so edits show up without a restart (it's also checked when `serve` starts). If TMDB fails part-way through a preview, the response still has what was found so far, with `error` saying what went wrong. If Radarr or Sonarr can't be reached, the preview fails with status 502.
+
 ## A word of caution
 
 Broad keywords can match a *lot* of titles. Review the preview first, use filters and exclusions to keep results relevant, and leave `search_on_add` off (the default) until you've reviewed what landed in Radarr and Sonarr. Your indexers and your disks will thank you.
@@ -137,7 +158,8 @@ Broad keywords can match a *lot* of titles. Review the preview first, use filter
 - [x] Tags on added titles (existing tags only)
 - [ ] More metadata sources (optional, e.g. Trakt, TVmaze, TVDB)
 - [x] Saved queries, and `run --scheduled` for any scheduler (cron, Airflow)
-- [ ] Docker service with an HTTP API
+- [x] Read-only HTTP API (`titularr serve`)
+- [ ] Docker image for running the API as a service
 - [ ] Beyond-title search: collections, keywords, characters (e.g. every Batman movie)
 - [ ] Radarr/Sonarr lookup as a source
 - [ ] Optional web UI (including manual review and an exclusion blacklist)
