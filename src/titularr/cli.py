@@ -373,6 +373,37 @@ def history(
         _usage_error(str(e))
 
 
+API_KEY_ENV_VAR = "TITULARR_API_KEY"
+
+
+@app.command()
+def serve(
+    host: Annotated[
+        str, typer.Option(help="Address to listen on. Use 0.0.0.0 to allow other machines.")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535, help="Port to listen on.")] = 8778,
+    config: ConfigOption = None,
+) -> None:
+    """Start the read-only HTTP API (docs at /docs). Needs $TITULARR_API_KEY."""
+    api_key = os.environ.get(API_KEY_ENV_VAR, "")
+    if not api_key:
+        _usage_error(f"set {API_KEY_ENV_VAR} to the key clients must send in the X-Api-Key header")
+    path = resolve_config_path(config)
+    # Checked once here so a broken config stops the service from starting; the API
+    # then reads it again on every request, so edits show up without a restart.
+    loaded = _load_config(path, required=True)
+    assert loaded is not None
+    for warning in loaded.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+
+    # Imported here so the other commands don't pay for loading the web server.
+    import uvicorn
+
+    from titularr.api import create_app
+
+    uvicorn.run(create_app(path, api_key), host=host, port=port)
+
+
 def _load_config(
     explicit: Path | None, *, required: bool, need_secrets: bool = True
 ) -> Config | None:
